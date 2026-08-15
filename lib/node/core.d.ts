@@ -23,6 +23,10 @@ declare module '@deepseek-ai/cordis' {
                 reasoningEffort?: string;
             };
         };
+        /** Agent preset registry — presets are composed via setup, not meta alone. */
+        agentPresets: {
+            mount(agentCtx: Context, presetId: string): Promise<unknown>;
+        };
     }
 }
 /** Runtime shape of the node config (defaults applied). */

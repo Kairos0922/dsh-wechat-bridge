@@ -28,6 +28,10 @@ declare module '@deepseek-ai/cordis' {
     agentDefaultModel?: {
       currentSelection(): { provider?: string; model?: string; reasoningEffort?: string }
     }
+    /** Agent preset registry — presets are composed via setup, not meta alone. */
+    agentPresets: {
+      mount(agentCtx: Context, presetId: string): Promise<unknown>
+    }
   }
 }
 
@@ -139,6 +143,15 @@ export class WechatBridgeNode {
     const provider = this.resolved.agentProvider || fallback.provider
     const model = this.resolved.agentModel || fallback.model
     try {
+      // The agent factory does NOT compose presets from meta.agentPreset on its
+      // own — the caller must supply `setup` that mounts the preset onto the
+      // agent scope (exactly what the web host's composeAgent does). Without
+      // this the session runs on the deployment's default persona.
+      const setup = preset
+        ? async (agentCtx: Context): Promise<void> => {
+            await this.ctx.agentPresets.mount(agentCtx, preset)
+          }
+        : undefined
       const handle = await this.ctx.agents.create({
         sessionId: newSessionId(),
         meta,
@@ -146,6 +159,7 @@ export class WechatBridgeNode {
           ...(provider ? { provider } : {}),
           ...(model ? { model } : {}),
         },
+        ...(setup ? { setup } : {}),
       })
       this.activeSessionId = handle.agent.session.id
       if (prompt) {
