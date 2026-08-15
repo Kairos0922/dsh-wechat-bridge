@@ -22,7 +22,7 @@ export { wechatBridgeNode } from './node/index.ts';
 export * from './gateway/types.ts';
 /** Cordis plugin name used by loader diagnostics and profile config. */
 export declare const name = "dsh-wechat-bridge";
-/** Services the bundle needs (provided by dsh-base). */
+/** Services the bundle needs (provided by dsh-base and the web shell). */
 export declare const inject: string[];
 /** Bundle config: gateway fields plus the node's policy. */
 export interface Config {

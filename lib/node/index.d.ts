@@ -58,6 +58,37 @@ export declare const Config: z<Schemastery.ObjectS<{
     agentModel: z<string, string>;
     mediaDir: z<string, string>;
 }>>;
-export declare function wechatBridgeNode(ctx: Context, config: NodeConfig): void;
-export default wechatBridgeNode;
+/** Plugin identity + service deps (object form, resolved per plugin row). */
+export declare const name = "wechat-bridge-node";
+export declare const inject: string[];
+declare function apply(ctx: Context, config: NodeConfig): void;
+export declare const wechatBridgeNode: {
+    name: string;
+    inject: string[];
+    Config: z<Schemastery.ObjectS<{
+        allowFrom: z<string[], string[]>;
+        digestIntervalSec: z<number, number>;
+        approvalTimeoutSec: z<number, number>;
+        maxMessageChars: z<number, number>;
+        sendChunkDelayMs: z<number, number>;
+        cwd: z<string, string>;
+        defaultMode: z<string, string>;
+        agentProvider: z<string, string>;
+        agentModel: z<string, string>;
+        mediaDir: z<string, string>;
+    }>, Schemastery.ObjectT<{
+        allowFrom: z<string[], string[]>;
+        digestIntervalSec: z<number, number>;
+        approvalTimeoutSec: z<number, number>;
+        maxMessageChars: z<number, number>;
+        sendChunkDelayMs: z<number, number>;
+        cwd: z<string, string>;
+        defaultMode: z<string, string>;
+        agentProvider: z<string, string>;
+        agentModel: z<string, string>;
+        mediaDir: z<string, string>;
+    }>>;
+    apply: typeof apply;
+};
+export {};
 //# sourceMappingURL=index.d.ts.map

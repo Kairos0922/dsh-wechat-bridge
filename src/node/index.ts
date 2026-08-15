@@ -15,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_MESSAGE_CHARS } from '../gateway/types.ts'
 import { WechatBridgeNode, type ResolvedNodeConfig } from './core.ts'
+import { registerHostApi } from '../host-api.ts'
 
 /** Plugin config. `allowFrom` is REQUIRED and validated at apply time. */
 export interface NodeConfig {
@@ -53,7 +54,11 @@ export const Config = z.object({
   mediaDir: z.string(),
 })
 
-export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
+/** Plugin identity + service deps (object form, resolved per plugin row). */
+export const name = 'wechat-bridge-node'
+export const inject = ['wechat', 'sessions', 'agents', 'approval', 'webServer']
+
+function apply(ctx: Context, config: NodeConfig): void {
   const resolved: ResolvedNodeConfig = {
     allowFrom: config.allowFrom ?? [],
     digestIntervalSec: config.digestIntervalSec ?? 300,
@@ -74,6 +79,9 @@ export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
     node.presets.list().length,
     resolved.defaultMode || '(unset)',
   )
+  // Settings-panel host API (differentiator #3) — registered here because the
+  // node row can inject `wechat` while the bundle row cannot (same-scope mount).
+  registerHostApi(ctx, ctx.wechat, node)
   ctx.effect(() => {
     return () => {
       node.dispose()
@@ -82,4 +90,4 @@ export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
   })
 }
 
-export default wechatBridgeNode
+export const wechatBridgeNode = { name, inject, Config, apply }
