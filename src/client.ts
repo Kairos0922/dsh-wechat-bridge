@@ -236,9 +236,9 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
 
 // ---------------------------------------------------------------- plugin
 
-export const inject = ['slots', 'locale'] as const
+const inject = ['slots', 'locale'] as const
 
-export function apply(ctx: Context): void {
+function apply(ctx: Context): void {
   ctx.effect(() => {
     return ctx.locale.register(NS, { zh, en })
   })
@@ -261,4 +261,6 @@ export function apply(ctx: Context): void {
 // No `export default`: the loader's unwrapExports picks `default` first and
 // drops the module-level `inject` export, which breaks service injection
 // ("cannot get property ... without inject"). Official client bundles also
-// export only named apply/inject.
+// export only named apply/inject — as a trailing named list, the form the
+// wrap script (scripts/wrap-client.mjs) converts into exports assignments.
+export { inject, apply }

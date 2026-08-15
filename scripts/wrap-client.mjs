@@ -84,5 +84,19 @@ ${indent(src, 2)}
 });
 `
 
+// 3. Fail-loud guard: the factory body runs as a classic script in the
+//    browser — any statement-level `export`/`import` left behind is a
+//    SyntaxError there and the bundle fails to register (the "loaded without
+//    registering" boot failure). Never emit an invalid bundle silently.
+const stray = wrapped.match(/^\s*(?:export\s|import\s)[^\n]*$/gm)
+if (stray) {
+  throw new Error(
+    `wrap-client: ${FILE} still contains statement-level export/import lines ` +
+    `(invalid inside the classic-script factory):\n` +
+    stray.map((line) => `  ${line.trim()}`).join('\n') +
+    `\nUse a trailing \`export { ... }\` list (official dsh client style) instead of inline exports.`,
+  )
+}
+
 await writeFile(FILE, wrapped + (mapLine ? `\n${mapLine}` : ''))
 console.log(`wrapped ${FILE} for __ModuleLoader__ id "${ID}"`)
