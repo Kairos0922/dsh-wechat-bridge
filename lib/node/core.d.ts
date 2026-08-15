@@ -13,6 +13,18 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId, type Session } from '@deepseek-ai/dsh-session';
 import { type PendingApproval } from './approvals.ts';
 import { PresetRegistry } from './presets.ts';
+/** Default-model service seam (provided by dsh-base; sibling loader entry). */
+declare module '@deepseek-ai/cordis' {
+    interface Context {
+        agentDefaultModel?: {
+            currentSelection(): {
+                provider?: string;
+                model?: string;
+                reasoningEffort?: string;
+            };
+        };
+    }
+}
 /** Runtime shape of the node config (defaults applied). */
 export interface ResolvedNodeConfig {
     allowFrom: string[];

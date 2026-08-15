@@ -22,6 +22,15 @@ import { attachSessionOutbound, sendTextToPeer } from './outbound.ts'
 import { PresetRegistry } from './presets.ts'
 import { debugLog } from '../debug-log.ts'
 
+/** Default-model service seam (provided by dsh-base; sibling loader entry). */
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    agentDefaultModel?: {
+      currentSelection(): { provider?: string; model?: string; reasoningEffort?: string }
+    }
+  }
+}
+
 /** Runtime shape of the node config (defaults applied). */
 export interface ResolvedNodeConfig {
   allowFrom: string[]
@@ -121,13 +130,19 @@ export class WechatBridgeNode {
     const meta: Record<string, string> = {}
     if (this.resolved.cwd) meta.cwd = this.resolved.cwd
     if (preset) meta.agentPreset = preset
+    // Preset personas assemble template variables such as `{{model}}` — an
+    // agent created without a model selection fails the assembly. Fall back to
+    // the deployment's default model when no bridge-level override is set.
+    const fallback = this.ctx.agentDefaultModel?.currentSelection?.() ?? {}
+    const provider = this.resolved.agentProvider || fallback.provider
+    const model = this.resolved.agentModel || fallback.model
     try {
       const handle = await this.ctx.agents.create({
         sessionId: newSessionId(),
         meta,
         agentOptions: {
-          ...(this.resolved.agentProvider ? { provider: this.resolved.agentProvider } : {}),
-          ...(this.resolved.agentModel ? { model: this.resolved.agentModel } : {}),
+          ...(provider ? { provider } : {}),
+          ...(model ? { model } : {}),
         },
       })
       this.activeSessionId = handle.agent.session.id
