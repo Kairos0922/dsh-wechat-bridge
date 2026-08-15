@@ -20,6 +20,7 @@ import { listSessions, routeCommand } from './commands.ts'
 import { handleInbound } from './inbound.ts'
 import { attachSessionOutbound, sendTextToPeer } from './outbound.ts'
 import { PresetRegistry } from './presets.ts'
+import { debugLog } from '../debug-log.ts'
 
 /** Runtime shape of the node config (defaults applied). */
 export interface ResolvedNodeConfig {
@@ -153,6 +154,12 @@ export class WechatBridgeNode {
 
   /** Route one inbound text: commands first, then the active agent. */
   async handleText(text: string): Promise<void> {
+    debugLog({
+      event: 'text',
+      from: this.peerId,
+      isCommand: text.trim().startsWith('/'),
+      text: text.slice(0, 120),
+    })
     if (await routeCommand(this, text)) return
     const agent = this.activeAgent()
     if (!agent) {
@@ -162,6 +169,7 @@ export class WechatBridgeNode {
       )
       return
     }
+    debugLog({ event: 'followup', session: this.activeSessionId })
     agent.followup(
       createUserMessage({
         content: [{ type: 'text', text }],

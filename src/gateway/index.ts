@@ -37,6 +37,7 @@ import {
   type WechatCredentials,
 } from './types.ts'
 import { downloadImage as downloadImageMedia } from './media.ts'
+import { debugLog } from '../debug-log.ts'
 
 export interface GatewayConfig {
   baseUrl?: string
@@ -318,6 +319,7 @@ export class WechatGateway extends Service {
             // (panel/CLI) takes effect without another restart.
             this.status = 'paused'
             this.pairingMessage = '会话过期(-14)，若重新扫码配对将自动恢复'
+            debugLog({ event: 'poll-14' })
             this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(-14)，10 分钟后重试')
             await new Promise((r) => setTimeout(r, 10 * 60_000))
             const fresh = await this.resolveCredentials()
@@ -333,6 +335,7 @@ export class WechatGateway extends Service {
           this.status = 'polling'
         } catch (err) {
           failures += 1
+          debugLog({ event: 'poll-error', failures, error: String(err).slice(0, 200) })
           this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s', failures, String(err))
           await new Promise((r) => setTimeout(r, 2_000))
         } finally {
@@ -371,6 +374,13 @@ export class WechatGateway extends Service {
         ?.filter((item) => item.type === ITEM_TEXT)
         .map((item) => item.text_item?.text ?? '')
         .join('')
+      debugLog({
+        event: 'inbound',
+        msgId: id ?? null,
+        from: senderId,
+        itemTypes: (msg.item_list ?? []).map((i) => i.type),
+        text: text.slice(0, 120) || null,
+      })
       this.ctx.emit('wechat/message', payload)
       if (text) {
         this.ctx.logger.info('[dsh-wechat-bridge] inbound from %s: %s', senderId, text.slice(0, 120))
@@ -393,7 +403,10 @@ export class WechatGateway extends Service {
     creds?: WechatCredentials
   }): Promise<boolean> {
     const creds = params.creds ?? (await this.resolveCredentials())
-    if (!creds?.botToken) return false
+    if (!creds?.botToken) {
+      debugLog({ event: 'send', to: params.toUserId, ok: false, error: 'no credentials' })
+      return false
+    }
     try {
       await sendMessage({
         baseUrl: creds.baseUrl || this.c.baseUrl,
@@ -404,8 +417,10 @@ export class WechatGateway extends Service {
           item_list: [{ type: ITEM_TEXT, text_item: { text: params.text } }],
         },
       })
+      debugLog({ event: 'send', to: params.toUserId, ok: true, len: params.text.length })
       return true
     } catch (err) {
+      debugLog({ event: 'send', to: params.toUserId, ok: false, error: String(err).slice(0, 200) })
       this.ctx.logger.warn('[dsh-wechat-bridge] sendText failed: %s', String(err))
       return false
     }

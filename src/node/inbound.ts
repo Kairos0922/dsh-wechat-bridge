@@ -27,6 +27,7 @@ import type { WechatBridgeNode } from './core.ts'
 import { routeCommand } from './commands.ts'
 import { sendTextToPeer } from './outbound.ts'
 import { resolveDshHome } from './presets.ts'
+import { debugLog } from '../debug-log.ts'
 
 /** Default media dir (per-bridge, under DSH storages). */
 export function defaultMediaDir(): string {
@@ -96,7 +97,9 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   if (!senderId) return
 
   // ---- allowlist gate: the security boundary ------------------------------
-  if (!node.isAllowed(senderId)) {
+  const allowed = node.isAllowed(senderId)
+  debugLog({ event: 'gate', from: senderId, allowed })
+  if (!allowed) {
     node.ctx.logger.info(
       '[dsh-wechat-bridge] ignoring message from non-allowlisted sender %s (never fed to the model)',
       senderId,
