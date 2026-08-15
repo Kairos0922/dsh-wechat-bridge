@@ -92,6 +92,8 @@ declare module '@deepseek-ai/cordis' {
 
 export class WechatGateway extends Service {
   static Config = Config
+  /** Pull the credentials service in from sibling loader entries. */
+  static inject = ['credentials']
 
   status: GatewayStatus = 'unauthenticated'
 

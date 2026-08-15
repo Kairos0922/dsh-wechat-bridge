@@ -80,6 +80,8 @@ export declare class WechatGateway extends Service {
         token: z<string, string>;
         accountId: z<string, string>;
     }>>;
+    /** Pull the credentials service in from sibling loader entries. */
+    static inject: string[];
     status: GatewayStatus;
     readonly ctx: Context;
     private c;

@@ -258,4 +258,7 @@ export function apply(ctx: Context): void {
   )
 }
 
-export default apply
+// No `export default`: the loader's unwrapExports picks `default` first and
+// drops the module-level `inject` export, which breaks service injection
+// ("cannot get property ... without inject"). Official client bundles also
+// export only named apply/inject.

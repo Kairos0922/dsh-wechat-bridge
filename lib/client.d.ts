@@ -23,5 +23,4 @@ declare module '@deepseek-ai/cordis' {
 }
 export declare const inject: readonly ["slots", "locale"];
 export declare function apply(ctx: Context): void;
-export default apply;
 //# sourceMappingURL=client.d.ts.map

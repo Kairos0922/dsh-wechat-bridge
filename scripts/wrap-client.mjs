@@ -48,14 +48,18 @@ src = src.replace(importRe, (match, clause, spec) => {
   return ''
 })
 
-// 2. Convert the trailing export list into CommonJS exports assignments.
+// 2. Convert the trailing export list into CommonJS exports assignments,
+//    honouring `from as to` aliases (tsdown emits `x_default as default`).
 const exportRe = /^export\s+\{\s*([^}]+?)\s*\};?\s*$/m
 src = src.replace(exportRe, (match, names) =>
   names
     .split(',')
-    .map((name) => name.trim())
+    .map((part) => part.trim())
     .filter(Boolean)
-    .map((name) => `exports.${name} = ${name};`)
+    .map((part) => {
+      const [from, to] = part.split(/\s+as\s+/)
+      return `exports.${(to ?? from).trim()} = ${from.trim()};`
+    })
     .join('\n'),
 )
 
