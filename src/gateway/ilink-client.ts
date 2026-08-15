@@ -281,6 +281,40 @@ export async function sendTyping(params: {
   })
 }
 
+/**
+ * Notify the gateway that this channel client is starting. Without it the
+ * server may ack sends (ret=0) but never deliver them to the WeChat client —
+ * observed after abrupt restarts. Called once at gateway boot.
+ */
+export async function notifyStart(params: {
+  baseUrl: string
+  token?: string
+  timeoutMs?: number
+}): Promise<void> {
+  await apiPostFetch({
+    baseUrl: params.baseUrl,
+    endpoint: 'ilink/bot/msg/notifystart',
+    body: JSON.stringify({ base_info: buildBaseInfo() }),
+    token: params.token,
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+  })
+}
+
+/** Notify the gateway that this channel client is stopping. */
+export async function notifyStop(params: {
+  baseUrl: string
+  token?: string
+  timeoutMs?: number
+}): Promise<void> {
+  await apiPostFetch({
+    baseUrl: params.baseUrl,
+    endpoint: 'ilink/bot/msg/notifystop',
+    body: JSON.stringify({ base_info: buildBaseInfo() }),
+    token: params.token,
+    timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
+  })
+}
+
 // ---------------------------------------------------------------- QR login flow
 
 export interface QrCodeResponse {

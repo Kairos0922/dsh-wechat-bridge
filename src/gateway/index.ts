@@ -20,6 +20,8 @@ import {
   fetchQrCode,
   getConfig,
   getUpdates,
+  notifyStart,
+  notifyStop,
   pollQrStatus,
   sendMessage,
   sendTyping,
@@ -119,6 +121,13 @@ export class WechatGateway extends Service {
         this.status = 'stopped'
         this.stopPolling = true
         this.pollAbort?.abort()
+        // Best-effort farewell so the server flips the channel state promptly.
+        void this.resolveCredentials().then((creds) => {
+          if (creds?.botToken) {
+            return notifyStop({ baseUrl: creds.baseUrl || this.c.baseUrl, token: creds.botToken })
+          }
+          return undefined
+        }).catch(() => {})
         this.ctx.logger.info('[dsh-wechat-bridge] wechat-gateway disposed')
       }
     })
@@ -151,6 +160,14 @@ export class WechatGateway extends Service {
     if (!creds) {
       this.status = 'unauthenticated'
       return
+    }
+    // Announce this poller to the gateway — without it the server may accept
+    // sends but never deliver them after an abrupt restart.
+    try {
+      await notifyStart({ baseUrl: creds.baseUrl || this.c.baseUrl, token: creds.botToken })
+      debugLog({ event: 'notify-start', ok: true })
+    } catch (err) {
+      debugLog({ event: 'notify-start', ok: false, error: String(err).slice(0, 200) })
     }
     this.status = 'polling'
     void this.pollLoop(creds)

@@ -71,6 +71,22 @@ export declare function sendTyping(params: {
     status: 1 | 2;
     timeoutMs?: number;
 }): Promise<void>;
+/**
+ * Notify the gateway that this channel client is starting. Without it the
+ * server may ack sends (ret=0) but never deliver them to the WeChat client —
+ * observed after abrupt restarts. Called once at gateway boot.
+ */
+export declare function notifyStart(params: {
+    baseUrl: string;
+    token?: string;
+    timeoutMs?: number;
+}): Promise<void>;
+/** Notify the gateway that this channel client is stopping. */
+export declare function notifyStop(params: {
+    baseUrl: string;
+    token?: string;
+    timeoutMs?: number;
+}): Promise<void>;
 export interface QrCodeResponse {
     qrcode: string;
     qrcode_img_content?: string;
