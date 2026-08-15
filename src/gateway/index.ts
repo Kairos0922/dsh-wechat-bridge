@@ -55,7 +55,12 @@ export const Config = z.object({
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped'
 
 export interface LoginQrOptions {
-  onQr?: (qr: { scanData: string; imgContent?: string }) => void
+  /**
+   * QR payload: `scanData` is the scannable content (a URL from the server's
+   * `qrcode_img_content` field — NOT the polling token), `pollToken` is the
+   * hex token used for `get_qrcode_status` polling only.
+   */
+  onQr?: (qr: { scanData: string; pollToken: string }) => void
   onStatus?: (status: QrLoginStatus | string) => void
   botType?: string
   /** Overall login timeout (ms). Default 5 minutes. */
@@ -162,7 +167,7 @@ export class WechatGateway extends Service {
     botType?: string
     timeoutMs?: number
     qrPollIntervalMs?: number
-    onQr?: (qr: { scanData: string; imgContent?: string }) => void
+    onQr?: (qr: { scanData: string; pollToken: string }) => void
     onStatus?: (status: QrLoginStatus | string) => void
     onConfirmed: (creds: WechatCredentials) => Promise<void>
   }): Promise<{ success: boolean; credentials?: WechatCredentials; message: string }> {
@@ -171,8 +176,14 @@ export class WechatGateway extends Service {
     this.status = 'pairing'
     const startedAt = Date.now()
 
+    const emitQr = (qr: { qrcode: string; qrcode_img_content?: string }): void => {
+      // `qrcode` is the POLLING token; `qrcode_img_content` is the scannable
+      // URL (a plain string, not base64 — official client renders it as-is).
+      opts.onQr?.({ scanData: qr.qrcode_img_content || qr.qrcode, pollToken: qr.qrcode })
+    }
+
     let qr = await fetchQrCode({ botType: opts.botType })
-    opts.onQr?.({ scanData: qr.qrcode, imgContent: qr.qrcode_img_content })
+    emitQr(qr)
 
     let baseUrl = LOGIN_BASE_URL
     while (Date.now() - startedAt < timeoutMs) {
@@ -200,7 +211,7 @@ export class WechatGateway extends Service {
         case 'expired':
           opts.onStatus?.('expired')
           qr = await fetchQrCode({ baseUrl, botType: opts.botType })
-          opts.onQr?.({ scanData: qr.qrcode, imgContent: qr.qrcode_img_content })
+          emitQr(qr)
           break
         case 'need_verifycode':
           opts.onStatus?.('need_verifycode')

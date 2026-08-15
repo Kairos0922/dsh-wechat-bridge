@@ -33,9 +33,14 @@ export declare const Config: z<Schemastery.ObjectS<{
 }>>;
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped';
 export interface LoginQrOptions {
+    /**
+     * QR payload: `scanData` is the scannable content (a URL from the server's
+     * `qrcode_img_content` field — NOT the polling token), `pollToken` is the
+     * hex token used for `get_qrcode_status` polling only.
+     */
     onQr?: (qr: {
         scanData: string;
-        imgContent?: string;
+        pollToken: string;
     }) => void;
     onStatus?: (status: QrLoginStatus | string) => void;
     botType?: string;
