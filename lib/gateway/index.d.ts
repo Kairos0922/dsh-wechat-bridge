@@ -13,7 +13,7 @@
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type QrLoginStatus } from './ilink-client.ts';
-import { type InboundEvent, type WechatCredentials } from './types.ts';
+import { type ImageItem, type InboundEvent, type WechatCredentials } from './types.ts';
 export interface GatewayConfig {
     baseUrl?: string;
     cdnBaseUrl?: string;
@@ -92,6 +92,11 @@ export declare class WechatGateway extends Service {
     loginQr(opts?: LoginQrOptions): Promise<LoginQrResult>;
     private pollLoop;
     private handleBatch;
+    /** Download and decrypt an inbound image (M3: image-in-session). */
+    downloadImage(item: ImageItem): Promise<{
+        data: Buffer;
+        ext: string;
+    }>;
     /** Send a text message to a peer. Returns true on success. */
     sendText(params: {
         toUserId: string;

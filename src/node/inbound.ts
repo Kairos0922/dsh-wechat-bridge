@@ -13,10 +13,25 @@
  * @module dsh-wechat-bridge/node/inbound
  */
 
-import { ITEM_TEXT, ITEM_VOICE, type InboundEvent, type InboundMessage } from '../gateway/types.ts'
+import fs from 'node:fs'
+import path from 'node:path'
+import {
+  ITEM_IMAGE,
+  ITEM_TEXT,
+  ITEM_VOICE,
+  type ImageItem,
+  type InboundEvent,
+  type InboundMessage,
+} from '../gateway/types.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { routeCommand } from './commands.ts'
 import { sendTextToPeer } from './outbound.ts'
+import { resolveDshHome } from './presets.ts'
+
+/** Default media dir (per-bridge, under DSH storages). */
+export function defaultMediaDir(): string {
+  return path.join(resolveDshHome(), 'storages', 'dsh-wechat-bridge', 'media')
+}
 
 /** Extract the visible text of an inbound message (text + voice transcription). */
 export function extractText(message: InboundMessage): string {
@@ -39,6 +54,42 @@ export function extractText(message: InboundMessage): string {
   return ''
 }
 
+/**
+ * Download inbound images to the local workspace and hand the paths to the
+ * agent (differentiator #2 — image-in-session). Media bytes never leave the
+ * machine beyond the CDN download itself.
+ */
+async function handleImages(
+  node: WechatBridgeNode,
+  message: InboundMessage,
+  images: ImageItem[],
+  text: string,
+): Promise<void> {
+  const dir = path.join(
+    node.resolved.mediaDir ?? defaultMediaDir(),
+    String(node.activeSessionId ?? 'unbound'),
+  )
+  fs.mkdirSync(dir, { recursive: true })
+  const saved: string[] = []
+  for (let i = 0; i < images.length; i++) {
+    try {
+      const { data, ext } = await node.ctx.wechat.downloadImage(images[i]!)
+      const file = path.join(dir, `wechat-${message.message_id ?? Date.now()}-${i}.${ext}`)
+      fs.writeFileSync(file, data)
+      saved.push(file)
+    } catch (err) {
+      node.ctx.logger.warn('[dsh-wechat-bridge] image download failed: %s', String(err))
+    }
+  }
+  const parts = [text.trim()]
+  if (saved.length > 0) {
+    parts.push(`📷 已接收图片（本地路径）:\n${saved.map((p) => `- ${p}`).join('\n')}`)
+  }
+  const combined = parts.filter(Boolean).join('\n\n')
+  if (!combined.trim()) return
+  await node.handleText(combined)
+}
+
 /** Handle one inbound iLink message. */
 export async function handleInbound(node: WechatBridgeNode, payload: InboundEvent): Promise<void> {
   const { message, senderId, contextToken } = payload
@@ -53,14 +104,22 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
     return
   }
 
+  const images = (message.item_list ?? [])
+    .filter((item) => item?.type === ITEM_IMAGE)
+    .map((item) => item.image_item ?? {})
   const text = extractText(message)
-  if (!text.trim()) {
-    node.ctx.logger.info('[dsh-wechat-bridge] ignoring media-only message from %s (M3: image-in-session)', senderId)
-    return
-  }
 
   node.peerId = senderId
   node.peerContextToken = contextToken ?? null
+
+  if (images.length > 0) {
+    await handleImages(node, message, images, text)
+    return
+  }
+  if (!text.trim()) {
+    node.ctx.logger.info('[dsh-wechat-bridge] ignoring non-text non-image message from %s', senderId)
+    return
+  }
 
   await node.handleText(text)
 }

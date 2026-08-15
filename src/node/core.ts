@@ -32,6 +32,7 @@ export interface ResolvedNodeConfig {
   defaultMode?: string
   agentProvider?: string
   agentModel?: string
+  mediaDir?: string
 }
 
 /** Default session id prefix for /new-created sessions. */

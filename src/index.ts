@@ -52,6 +52,8 @@ export interface Config {
   agentProvider?: string
   /** Model id override for `/new` agents. */
   agentModel?: string
+  /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
+  mediaDir?: string
   /** iLink gateway base url (defaults to ilinkai.weixin.qq.com). */
   baseUrl?: string
   /** WeChat CDN base url for media. */
@@ -72,6 +74,7 @@ export const Config = z.object({
   defaultMode: z.string(),
   agentProvider: z.string(),
   agentModel: z.string(),
+  mediaDir: z.string(),
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
   token: z.string().default(''),
@@ -99,6 +102,7 @@ export function apply(ctx: Context, config: Config): void {
     defaultMode: config.defaultMode,
     agentProvider: config.agentProvider,
     agentModel: config.agentModel,
+    mediaDir: config.mediaDir,
   })
 }
 

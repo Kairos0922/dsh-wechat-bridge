@@ -30,10 +30,12 @@ import {
   MESSAGE_DEDUP_TTL_SECONDS,
   MESSAGE_TYPE_USER,
   SESSION_EXPIRED_ERRCODE,
+  type ImageItem,
   type InboundEvent,
   type InboundMessage,
   type WechatCredentials,
 } from './types.ts'
+import { downloadImage as downloadImageMedia } from './media.ts'
 
 export interface GatewayConfig {
   baseUrl?: string
@@ -282,6 +284,11 @@ export class WechatGateway extends Service {
   }
 
   // ---------------------------------------------------------------- outbound
+
+  /** Download and decrypt an inbound image (M3: image-in-session). */
+  async downloadImage(item: ImageItem): Promise<{ data: Buffer; ext: string }> {
+    return downloadImageMedia({ item, cdnBaseUrl: this.c.cdnBaseUrl })
+  }
 
   /** Send a text message to a peer. Returns true on success. */
   async sendText(params: {

@@ -18,9 +18,12 @@ export interface PresetInfo {
   dir: string
 }
 
+export function resolveDshHome(): string {
+  return process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh')
+}
+
 export function resolveAgentPresetsDir(): string {
-  const dshHome = process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh')
-  return path.join(dshHome, '.agent-presets')
+  return path.join(resolveDshHome(), '.agent-presets')
 }
 
 /** Scan the agent-presets dir and return preset ids (sorted, dirs with agent.cordis.yml). */

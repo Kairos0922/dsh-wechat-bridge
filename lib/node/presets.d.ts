@@ -12,6 +12,7 @@ export interface PresetInfo {
     id: string;
     dir: string;
 }
+export declare function resolveDshHome(): string;
 export declare function resolveAgentPresetsDir(): string;
 /** Scan the agent-presets dir and return preset ids (sorted, dirs with agent.cordis.yml). */
 export declare function discoverPresets(presetsDir?: string): PresetInfo[];

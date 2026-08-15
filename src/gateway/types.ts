@@ -8,7 +8,7 @@
  */
 
 export const ILINK_BASE_URL = 'https://ilinkai.weixin.qq.com'
-export const WEIXIN_CDN_BASE_URL = 'https://weixin-cdn.weixin.qq.com'
+export const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
 export const LONG_POLL_TIMEOUT_MS = 35_000
 export const API_TIMEOUT_MS = 15_000
@@ -35,15 +35,25 @@ export interface TextItem {
 export interface CdnMedia {
   encrypt_query_param?: string
   aes_key?: string
+  /** 加密类型: 0=只加密fileid, 1=打包缩略图/中图等信息 */
+  encrypt_type?: number
+  /** 完整下载 URL（服务端直接返回，无需客户端拼接） */
+  full_url?: string
 }
 
 export interface ImageItem {
+  /** 原图 CDN 引用 */
+  media?: CdnMedia
+  /** 缩略图 CDN 引用 */
+  thumb_media?: CdnMedia
+  /** Raw AES-128 key as hex string (16 bytes); preferred for inbound decryption. */
+  aeskey?: string
   url?: string
-  aes_key?: string
-  thumb_url?: string
-  thumb_aes_key?: string
-  width?: number
-  height?: number
+  mid_size?: number
+  thumb_size?: number
+  thumb_height?: number
+  thumb_width?: number
+  hd_size?: number
 }
 
 export interface MessageItem {

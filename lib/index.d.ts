@@ -44,6 +44,8 @@ export interface Config {
     agentProvider?: string;
     /** Model id override for `/new` agents. */
     agentModel?: string;
+    /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
+    mediaDir?: string;
     /** iLink gateway base url (defaults to ilinkai.weixin.qq.com). */
     baseUrl?: string;
     /** WeChat CDN base url for media. */
@@ -63,6 +65,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     defaultMode: z<string, string>;
     agentProvider: z<string, string>;
     agentModel: z<string, string>;
+    mediaDir: z<string, string>;
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
     token: z<string, string>;
@@ -77,6 +80,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     defaultMode: z<string, string>;
     agentProvider: z<string, string>;
     agentModel: z<string, string>;
+    mediaDir: z<string, string>;
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
     token: z<string, string>;

@@ -16,6 +16,8 @@ import { type InboundEvent, type InboundMessage } from '../gateway/types.ts';
 import type { WechatBridgeNode } from './core.ts';
 import { routeCommand } from './commands.ts';
 import { sendTextToPeer } from './outbound.ts';
+/** Default media dir (per-bridge, under DSH storages). */
+export declare function defaultMediaDir(): string;
 /** Extract the visible text of an inbound message (text + voice transcription). */
 export declare function extractText(message: InboundMessage): string;
 /** Handle one inbound iLink message. */

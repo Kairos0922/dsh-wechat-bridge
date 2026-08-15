@@ -36,6 +36,8 @@ export interface NodeConfig {
   agentProvider?: string
   /** Model id for `/new` agents. */
   agentModel?: string
+  /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
+  mediaDir?: string
 }
 
 export const Config = z.object({
@@ -48,6 +50,7 @@ export const Config = z.object({
   defaultMode: z.string(),
   agentProvider: z.string(),
   agentModel: z.string(),
+  mediaDir: z.string(),
 })
 
 export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
@@ -61,6 +64,7 @@ export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
     defaultMode: config.defaultMode,
     agentProvider: config.agentProvider,
     agentModel: config.agentModel,
+    mediaDir: config.mediaDir,
   }
   const node = new WechatBridgeNode(ctx, resolved)
   node.attach()

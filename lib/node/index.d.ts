@@ -32,6 +32,8 @@ export interface NodeConfig {
     agentProvider?: string;
     /** Model id for `/new` agents. */
     agentModel?: string;
+    /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
+    mediaDir?: string;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     allowFrom: z<string[], string[]>;
@@ -43,6 +45,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     defaultMode: z<string, string>;
     agentProvider: z<string, string>;
     agentModel: z<string, string>;
+    mediaDir: z<string, string>;
 }>, Schemastery.ObjectT<{
     allowFrom: z<string[], string[]>;
     digestIntervalSec: z<number, number>;
@@ -53,6 +56,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     defaultMode: z<string, string>;
     agentProvider: z<string, string>;
     agentModel: z<string, string>;
+    mediaDir: z<string, string>;
 }>>;
 export declare function wechatBridgeNode(ctx: Context, config: NodeConfig): void;
 export default wechatBridgeNode;
