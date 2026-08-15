@@ -73,6 +73,18 @@ plugins:
 
 > 本插件为 **web profile 专用**（client 面板 + webServer 端点）；headless 可加载网关但无设置面板。
 
+## 首次部署检查清单（装进 web profile 后逐项验收）
+
+1. `dsh plugin --profile web add <本仓库目录>`；在 web profile 的 `cordis.patch.yml` 配置 `allowFrom: ["<扫码者的微信 uid>"]` 与 `defaultMode`
+2. 重启 `dsh web`；打开设置 → 插件 → **微信桥**：状态应显示 `unauthenticated`，模式列表应列出全部预设
+3. 面板内点「扫码配对」扫码确认；状态变 `polling`/已配对
+4. 微信发 `/modes` → 收到模式列表；`/new life-butler 你好` → 收到会话创建 + agent 回复
+5. 白名单外联系人发消息 → 无响应（日志有 ignoring 记录）；发图片 → 落 `$DSH_HOME/storages/dsh-wechat-bridge/media/`
+
+## 发布前提（发布前需 Kairos 决策）
+
+代码与构建已 publish-ready（`npm pack` 内容完整、MIT 双署名、双语 README）。**发布到 npm / 公共仓库属云端行为**，与 kairos-life「永不云端」红线冲突——是否开源发布、以什么形式，由 Kairos 单独决策后执行；未决策前仅在本仓库内维护。
+
 ## License
 
 MIT — 完整署名见 [LICENSE](LICENSE)。
