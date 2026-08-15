@@ -39,7 +39,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"test/*.test.ts\"",
     "login": "node scripts/login.mjs",
-    "prepublishOnly": "pnpm build && pnpm bundle"
+    "verify": "pnpm build && pnpm bundle && node --check lib/client.js && node --check lib/index.js && pnpm test",
+    "prepublishOnly": "pnpm verify"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
