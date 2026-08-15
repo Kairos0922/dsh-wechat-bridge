@@ -13,6 +13,7 @@ import type { AssistantMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MAX_MESSAGE_CHARS } from '../gateway/types.ts'
 import type { WechatBridgeNode } from './core.ts'
+import { debugLog } from '../debug-log.ts'
 
 // ---------------------------------------------------------------------------
 // Chunking
@@ -229,6 +230,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     if (session.id !== node.activeSessionId) return
     const state = digestState.get(session.id) ?? { startedTurns: new Set<number>() }
     digestState.set(session.id, state)
+    debugLog({ event: 'session-event', session: session.id, type: event.type })
 
     if (event.type === 'turn/start') {
       const turn = event.data.turn
