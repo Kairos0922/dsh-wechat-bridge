@@ -37,18 +37,28 @@ console.log(' dsh-wechat-bridge — iLink 微信登录')
 console.log('==============================================\n')
 
 const result = await ctx.wechat.loginQr({
+  timeoutMs: 30 * 60_000,
+  qrPollIntervalMs: 1500,
   onQr: (qr) => {
     fs.mkdirSync(stateDir, { recursive: true })
-    if (qr.imgContent) {
+    const svgPath = path.join(stateDir, 'qr.svg')
+    void (async () => {
       try {
-        fs.writeFileSync(qrPngPath, Buffer.from(qr.imgContent, 'base64'))
-        console.log(`📱 二维码图片已保存: ${qrPngPath}`)
-        console.log('   在访达中打开该图片，用手机微信扫码并确认。\n')
-      } catch {
-        // fall through to URL
+        const { default: QRCode } = await import('qrcode')
+        const svg = await QRCode.toString(qr.scanData, { type: 'svg', margin: 2, width: 480 })
+        fs.writeFileSync(svgPath, svg)
+        console.log(`📱 二维码已生成: ${svgPath}`)
+        const { execSync } = await import('node:child_process')
+        try {
+          execSync(`open "${svgPath}"`)
+          console.log('   已尝试在浏览器中自动打开，请用手机微信扫码并确认。\n')
+        } catch {
+          console.log('   请用浏览器打开上面的文件，用手机微信扫码并确认。\n')
+        }
+      } catch (err) {
+        console.log(`二维码生成失败（${String(err)}），扫码内容（备用）: ${qr.scanData}\n`)
       }
-    }
-    console.log(`二维码链接（备用，浏览器打开）: ${qr.scanData}\n`)
+    })()
   },
   onStatus: (status) => {
     if (status === 'scaned') console.log('已扫码，请在微信里确认…')

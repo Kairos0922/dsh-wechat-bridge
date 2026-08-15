@@ -42,7 +42,7 @@ export interface GatewayConfig {
   accountId?: string
 }
 
-export const GatewayConfig = z.object({
+export const Config = z.object({
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(''),
   token: z.string().default(''),
@@ -83,6 +83,8 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class WechatGateway extends Service {
+  static Config = Config
+
   status: GatewayStatus = 'unauthenticated'
 
   override readonly ctx: Context

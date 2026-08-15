@@ -1,12 +1,12 @@
 /**
  * wechat-bridge-node plugin: WeChat ⇄ DSH conversation bridge.
  *
- * M0 skeleton: config + allowlist shell. M2 adds the allowlist gate, the
- * dynamic agent-preset registry (`/modes`, `/new <mode>`), session commands,
- * approvals and digest outbound. M3 adds image-in-session.
- *
- * Consumes the `wechat` gateway service and dsh-base services
- * (`sessions`, `agents`, `approval`, `credentials`).
+ * Consumes the `wechat` gateway service and dsh-base services (`sessions`,
+ * `agents`, `approval`). Inbound WeChat text becomes a user message on the
+ * active session; session events become digest-style WeChat messages.
+ * Commands (`/modes /new /use /sessions /stop /status /yes /no`) are handled
+ * locally. The allowlist gate lives here — non-allowlisted senders are never
+ * fed to the model.
  *
  * @module dsh-wechat-bridge/node
  */
@@ -14,20 +14,31 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_MESSAGE_CHARS } from '../gateway/types.ts'
+import { WechatBridgeNode, type ResolvedNodeConfig } from './core.ts'
 
+/** Plugin config. `allowFrom` is REQUIRED and validated at apply time. */
 export interface NodeConfig {
+  /** Hard allowlist of WeChat sender ids. REQUIRED — no permissive default. */
   allowFrom?: string[]
+  /** Heartbeat interval for progress digests (seconds; 0 disables). */
   digestIntervalSec?: number
+  /** Approval prompt timeout before default-deny (seconds). */
   approvalTimeoutSec?: number
+  /** Max chars per WeChat bubble. */
   maxMessageChars?: number
+  /** Throttle between outbound bubbles (ms). */
   sendChunkDelayMs?: number
+  /** Working directory for `/new` sessions. */
   cwd?: string
+  /** Default agent preset for sessions created without an explicit mode. */
   defaultMode?: string
+  /** Provider route for `/new` agents. */
   agentProvider?: string
+  /** Model id for `/new` agents. */
   agentModel?: string
 }
 
-export const NodeConfig = z.object({
+export const Config = z.object({
   allowFrom: z.array(z.string()).default([]),
   digestIntervalSec: z.number().default(300),
   approvalTimeoutSec: z.number().default(600),
@@ -40,13 +51,30 @@ export const NodeConfig = z.object({
 })
 
 export function wechatBridgeNode(ctx: Context, config: NodeConfig): void {
+  const resolved: ResolvedNodeConfig = {
+    allowFrom: config.allowFrom ?? [],
+    digestIntervalSec: config.digestIntervalSec ?? 300,
+    approvalTimeoutSec: config.approvalTimeoutSec ?? 600,
+    maxMessageChars: config.maxMessageChars ?? MAX_MESSAGE_CHARS,
+    sendChunkDelayMs: config.sendChunkDelayMs ?? 1_500,
+    cwd: config.cwd,
+    defaultMode: config.defaultMode,
+    agentProvider: config.agentProvider,
+    agentModel: config.agentModel,
+  }
+  const node = new WechatBridgeNode(ctx, resolved)
+  node.attach()
+  ctx.logger.info(
+    '[dsh-wechat-bridge] wechat-bridge-node mounted (allowFrom=%d, modes=%d, defaultMode=%s)',
+    resolved.allowFrom.length,
+    node.presets.list().length,
+    resolved.defaultMode || '(unset)',
+  )
   ctx.effect(() => {
-    ctx.logger.info(
-      '[dsh-wechat-bridge] wechat-bridge-node mounted (allowFrom=%d, defaultMode=%s)',
-      config.allowFrom?.length ?? 0,
-      config.defaultMode || '(unset)',
-    )
-    return () => ctx.logger.info('[dsh-wechat-bridge] wechat-bridge-node disposed')
+    return () => {
+      node.dispose()
+      ctx.logger.info('[dsh-wechat-bridge] wechat-bridge-node disposed')
+    }
   })
 }
 

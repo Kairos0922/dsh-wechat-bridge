@@ -20,7 +20,7 @@ export interface GatewayConfig {
     token?: string;
     accountId?: string;
 }
-export declare const GatewayConfig: z<Schemastery.ObjectS<{
+export declare const Config: z<Schemastery.ObjectS<{
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
     token: z<string, string>;
@@ -64,6 +64,17 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare class WechatGateway extends Service {
+    static Config: z<Schemastery.ObjectS<{
+        baseUrl: z<string, string>;
+        cdnBaseUrl: z<string, string>;
+        token: z<string, string>;
+        accountId: z<string, string>;
+    }>, Schemastery.ObjectT<{
+        baseUrl: z<string, string>;
+        cdnBaseUrl: z<string, string>;
+        token: z<string, string>;
+        accountId: z<string, string>;
+    }>>;
     status: GatewayStatus;
     readonly ctx: Context;
     private c;
