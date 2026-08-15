@@ -1,0 +1,56 @@
+{
+  "name": "dsh-wechat-bridge",
+  "version": "0.1.0",
+  "description": "WeChat ⇄ DSH bridge bundle: iLink gateway + conversation node with dynamic agent-preset routing, image-in-session, and a Web settings panel",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "wechat",
+    "weixin",
+    "ilink",
+    "agent-preset",
+    "bridge"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "scripts",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "login": "node scripts/login.mjs",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-credentials": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-approval": "0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-credentials-local": "0.1.0-rc.6",
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
