@@ -75,11 +75,11 @@ plugins:
 
 ## 首次部署检查清单（装进 web profile 后逐项验收）
 
-1. `dsh plugin --profile web add <本仓库目录>`；在 web profile 的 `cordis.patch.yml` 配置 `allowFrom: ["<扫码者的微信 uid>"]` 与 `defaultMode`
-2. 重启 `dsh web`；打开设置 → 插件 → **微信桥**：状态应显示 `unauthenticated`，模式列表应列出全部预设
-3. 面板内点「扫码配对」扫码确认；状态变 `polling`/已配对
-4. 微信发 `/modes` → 收到模式列表；`/new life-butler 你好` → 收到会话创建 + agent 回复
-5. 白名单外联系人发消息 → 无响应（日志有 ignoring 记录）；发图片 → 落 `$DSH_HOME/storages/dsh-wechat-bridge/media/`
+- [x] 1. `dsh plugin --profile web add <本仓库目录>`；web profile 的 `cordis.patch.yml` 按 id 覆盖配置 `allowFrom` / `defaultMode`
+- [x] 2. 重启后状态端点 `/api/dsh-wechat-bridge/status`：`paired: true`、三模式动态发现、白名单正确
+- [x] 3. 扫码配对（CLI 或面板）成功，新会话建立，网关进入 `polling`
+- [ ] 4. 微信发 `/modes` → 收到模式列表；`/new <模式> 你好` → 收到会话创建 + agent 回复（待微信端实测）
+- [ ] 5. 白名单外联系人消息忽略、图片落 `$DSH_HOME/storages/dsh-wechat-bridge/media/`（待实测）
 
 ## 发布前提（发布前需 Kairos 决策）
 
