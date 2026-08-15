@@ -214,13 +214,13 @@ export interface SendMessageBody {
   item_list: Array<{ type: number; text_item?: { text?: string } }>
 }
 
-/** Send a single text message downstream. Throws on non-zero ret. */
+/** Send a single text message downstream. Returns the parsed response. */
 export async function sendMessage(params: {
   baseUrl: string
   token?: string
   body: SendMessageBody
   timeoutMs?: number
-}): Promise<void> {
+}): Promise<{ ret?: number; errcode?: number; errmsg?: string }> {
   const rawText = await apiPostFetch({
     baseUrl: params.baseUrl,
     endpoint: 'ilink/bot/sendmessage',
@@ -229,10 +229,11 @@ export async function sendMessage(params: {
     token: params.token,
     timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
   })
-  const resp = JSON.parse(rawText) as { ret?: number; errmsg?: string }
+  const resp = JSON.parse(rawText) as { ret?: number; errcode?: number; errmsg?: string }
   if (resp.ret && resp.ret !== 0) {
-    throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? '(none)'}`)
+    throw new Error(`sendMessage ret=${resp.ret} errcode=${resp.errcode ?? '-'} errmsg=${resp.errmsg ?? '(none)'}`)
   }
+  return resp
 }
 
 /** Fetch bot config (includes the typing ticket) for a given user. */

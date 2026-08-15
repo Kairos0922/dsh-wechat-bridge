@@ -409,7 +409,7 @@ export class WechatGateway extends Service {
       return false
     }
     try {
-      await sendMessage({
+      const resp = await sendMessage({
         baseUrl: creds.baseUrl || this.c.baseUrl,
         token: creds.botToken,
         body: {
@@ -425,6 +425,7 @@ export class WechatGateway extends Service {
         len: params.text.length,
         ctxToken: params.contextToken ?? null,
         text: params.text.slice(0, 60),
+        resp,
       })
       return true
     } catch (err) {

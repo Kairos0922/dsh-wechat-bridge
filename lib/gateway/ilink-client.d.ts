@@ -38,13 +38,17 @@ export interface SendMessageBody {
         };
     }>;
 }
-/** Send a single text message downstream. Throws on non-zero ret. */
+/** Send a single text message downstream. Returns the parsed response. */
 export declare function sendMessage(params: {
     baseUrl: string;
     token?: string;
     body: SendMessageBody;
     timeoutMs?: number;
-}): Promise<void>;
+}): Promise<{
+    ret?: number;
+    errcode?: number;
+    errmsg?: string;
+}>;
 /** Fetch bot config (includes the typing ticket) for a given user. */
 export declare function getConfig(params: {
     baseUrl: string;
