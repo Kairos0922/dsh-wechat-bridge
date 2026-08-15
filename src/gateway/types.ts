@@ -82,3 +82,10 @@ export interface WechatCredentials {
   /** WeChat user id of the account that scanned the login QR. */
   ilinkUserId?: string
 }
+
+/** Payload emitted by the gateway on `inbound` (scoped to the `wechat` service). */
+export interface InboundEvent {
+  message: InboundMessage
+  senderId: string
+  contextToken?: string
+}

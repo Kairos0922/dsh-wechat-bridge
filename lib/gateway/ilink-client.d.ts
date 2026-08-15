@@ -1,0 +1,99 @@
+/**
+ * iLink protocol client — self-contained, ported from Tencent/openclaw-weixin
+ * (MIT, Copyright (C) 2026 Tencent). See LICENSE for attribution.
+ *
+ * Covers: authenticated POST/GET fetch wrappers, getUpdates long-poll,
+ * sendMessage, getConfig, sendTyping, plus the QR login flow
+ * (get_bot_qrcode / get_qrcode_status). CDN upload/download is added in M3.
+ *
+ * @module dsh-wechat-bridge/gateway/ilink-client
+ */
+import type { UpdatesBatch } from './types.ts';
+export declare const LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com";
+export declare const DEFAULT_BOT_TYPE = "3";
+export declare const DEFAULT_BOT_AGENT = "dsh-wechat-bridge/0.1.0";
+export declare const DEFAULT_LONG_POLL_TIMEOUT_MS = 35000;
+export declare const DEFAULT_API_TIMEOUT_MS = 15000;
+export declare const DEFAULT_CONFIG_TIMEOUT_MS = 10000;
+export declare const QR_LONG_POLL_TIMEOUT_MS = 35000;
+export interface GetUpdatesParams {
+    baseUrl: string;
+    token?: string;
+    getUpdatesBuf?: string;
+    timeoutMs?: number;
+    abortSignal?: AbortSignal;
+}
+/**
+ * Long-poll getUpdates. On client-side timeout, returns an empty batch
+ * (ret=0) so the caller can simply retry — normal for long-poll.
+ */
+export declare function getUpdates(params: GetUpdatesParams): Promise<UpdatesBatch>;
+export interface SendMessageBody {
+    to_user_id: string;
+    context_token?: string;
+    item_list: Array<{
+        type: number;
+        text_item?: {
+            text?: string;
+        };
+    }>;
+}
+/** Send a single text message downstream. Throws on non-zero ret. */
+export declare function sendMessage(params: {
+    baseUrl: string;
+    token?: string;
+    body: SendMessageBody;
+    timeoutMs?: number;
+}): Promise<void>;
+/** Fetch bot config (includes the typing ticket) for a given user. */
+export declare function getConfig(params: {
+    baseUrl: string;
+    token?: string;
+    ilinkUserId: string;
+    contextToken?: string;
+    timeoutMs?: number;
+}): Promise<{
+    ret: number;
+    typing_ticket?: string;
+    errcode?: number;
+    errmsg?: string;
+}>;
+/** Send a typing indicator. */
+export declare function sendTyping(params: {
+    baseUrl: string;
+    token?: string;
+    ilinkUserId: string;
+    typingTicket: string;
+    status: 1 | 2;
+    timeoutMs?: number;
+}): Promise<void>;
+export interface QrCodeResponse {
+    qrcode: string;
+    qrcode_img_content?: string;
+}
+export type QrLoginStatus = 'wait' | 'scaned' | 'confirmed' | 'expired' | 'scaned_but_redirect' | 'need_verifycode' | 'verify_code_blocked' | 'binded_redirect';
+export interface QrStatusResponse {
+    status: QrLoginStatus;
+    bot_token?: string;
+    ilink_bot_id?: string;
+    baseurl?: string;
+    ilink_user_id?: string;
+    redirect_host?: string;
+}
+/** Request a login QR code (bot_type 3, the standard WeChat channel). */
+export declare function fetchQrCode(params: {
+    baseUrl?: string;
+    botType?: string;
+    timeoutMs?: number;
+}): Promise<QrCodeResponse>;
+/**
+ * Long-poll the QR status. Network errors and client-side timeouts degrade
+ * to `wait` so the caller keeps polling.
+ */
+export declare function pollQrStatus(params: {
+    baseUrl?: string;
+    qrcode: string;
+    verifyCode?: string;
+    timeoutMs?: number;
+}): Promise<QrStatusResponse>;
+//# sourceMappingURL=ilink-client.d.ts.map

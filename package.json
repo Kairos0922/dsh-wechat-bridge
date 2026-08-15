@@ -1,6 +1,7 @@
 {
   "name": "dsh-wechat-bridge",
   "version": "0.1.0",
+  "ilink_appid": "bot",
   "description": "WeChat ⇄ DSH bridge bundle: iLink gateway + conversation node with dynamic agent-preset routing, image-in-session, and a Web settings panel",
   "keywords": [
     "deepseek-harness",
