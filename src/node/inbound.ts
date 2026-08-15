@@ -91,6 +91,12 @@ async function handleImages(
   await node.handleText(combined)
 }
 
+/** Whether a message belongs to a group chat (MVP: not supported, ignored). */
+export function isGroupMessage(message: InboundMessage): boolean {
+  const roomId = String(message.room_id ?? message.chat_room_id ?? message.group_id ?? '').trim()
+  return Boolean(roomId)
+}
+
 /** Handle one inbound iLink message. */
 export async function handleInbound(node: WechatBridgeNode, payload: InboundEvent): Promise<void> {
   const { message, senderId, contextToken } = payload
@@ -104,6 +110,11 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
       '[dsh-wechat-bridge] ignoring message from non-allowlisted sender %s (never fed to the model)',
       senderId,
     )
+    return
+  }
+
+  if (isGroupMessage(message)) {
+    node.ctx.logger.info('[dsh-wechat-bridge] ignoring group message from %s (MVP: no group support)', senderId)
     return
   }
 

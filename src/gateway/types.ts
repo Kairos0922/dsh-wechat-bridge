@@ -56,24 +56,68 @@ export interface ImageItem {
   hd_size?: number
 }
 
-export interface MessageItem {
-  type: number
-  text_item?: TextItem
-  image_item?: ImageItem
-  ref_msg?: unknown
+export interface VoiceItem {
+  media?: CdnMedia
+  /** 语音编码类型：1=pcm 2=adpcm 3=feature 4=speex 5=amr 6=silk 7=mp3 8=ogg-speex */
+  encode_type?: number
+  bits_per_sample?: number
+  sample_rate?: number
+  /** 语音长度 (毫秒) */
+  playtime?: number
+  /** 语音转文字内容 */
+  text?: string
 }
 
+export interface FileItem {
+  media?: CdnMedia
+  file_name?: string
+  md5?: string
+  len?: string
+}
+
+export interface VideoItem {
+  media?: CdnMedia
+  video_size?: number
+  play_length?: number
+  video_md5?: string
+  thumb_media?: CdnMedia
+}
+
+export interface MessageItem {
+  type?: number
+  create_time_ms?: number
+  update_time_ms?: number
+  is_completed?: boolean
+  msg_id?: string
+  ref_msg?: unknown
+  text_item?: TextItem
+  image_item?: ImageItem
+  voice_item?: VoiceItem
+  file_item?: FileItem
+  video_item?: VideoItem
+}
+
+/** Mirror the official WeixinMessage field set (Tencent/openclaw-weixin). */
 export interface InboundMessage {
   seq?: number
   message_id?: number
   from_user_id?: string
   to_user_id?: string
+  client_id?: string
   create_time_ms?: number
+  update_time_ms?: number
+  delete_time_ms?: number
   session_id?: string
+  /** Group id when the message belongs to a group chat (MVP: ignored). */
+  group_id?: string
+  room_id?: string
+  chat_room_id?: string
+  msg_type?: number
   message_type?: number
   message_state?: number
   item_list?: MessageItem[]
   context_token?: string
+  run_id?: string
 }
 
 export interface UpdatesBatch {
