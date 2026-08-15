@@ -287,45 +287,62 @@ export class WechatGateway extends Service {
 
   // ---------------------------------------------------------------- poll loop
 
+  private pollRunning = false
+
   private async pollLoop(creds: WechatCredentials): Promise<void> {
-    const baseUrl = creds.baseUrl || this.c.baseUrl
-    const token = creds.botToken
-    let buf = ''
-    let failures = 0
-    while (!this.stopPolling) {
-      if (failures >= 3) {
-        this.status = 'paused'
-        this.ctx.logger.warn('[dsh-wechat-bridge] 3 次连续失败，暂停 30s 后重试')
-        await new Promise((r) => setTimeout(r, 30_000))
-        failures = 0
-      }
-      this.pollAbort = new AbortController()
-      try {
-        const batch = await getUpdates({
-          baseUrl,
-          token,
-          getUpdatesBuf: buf,
-          abortSignal: this.pollAbort.signal,
-        })
-        failures = 0
-        if (batch.errcode === SESSION_EXPIRED_ERRCODE) {
+    if (this.pollRunning) return
+    this.pollRunning = true
+    try {
+      let baseUrl = creds.baseUrl || this.c.baseUrl
+      let token = creds.botToken
+      let buf = ''
+      let failures = 0
+      while (!this.stopPolling) {
+        if (failures >= 3) {
           this.status = 'paused'
-          this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(-14)，10 分钟后重试')
-          await new Promise((r) => setTimeout(r, 10 * 60_000))
-          continue
+          this.ctx.logger.warn('[dsh-wechat-bridge] 3 次连续失败，暂停 30s 后重试')
+          await new Promise((r) => setTimeout(r, 30_000))
+          failures = 0
         }
-        buf = batch.get_updates_buf ?? buf
-        this.handleBatch(batch.msgs ?? [])
-        this.status = 'polling'
-      } catch (err) {
-        failures += 1
-        this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s', failures, String(err))
-        await new Promise((r) => setTimeout(r, 2_000))
-      } finally {
-        this.pollAbort = null
+        this.pollAbort = new AbortController()
+        try {
+          const batch = await getUpdates({
+            baseUrl,
+            token,
+            getUpdatesBuf: buf,
+            abortSignal: this.pollAbort.signal,
+          })
+          failures = 0
+          if (batch.errcode === SESSION_EXPIRED_ERRCODE) {
+            // -14 session timeout: re-resolve credentials so a fresh pairing
+            // (panel/CLI) takes effect without another restart.
+            this.status = 'paused'
+            this.pairingMessage = '会话过期(-14)，若重新扫码配对将自动恢复'
+            this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(-14)，10 分钟后重试')
+            await new Promise((r) => setTimeout(r, 10 * 60_000))
+            const fresh = await this.resolveCredentials()
+            if (fresh?.botToken) {
+              baseUrl = fresh.baseUrl || this.c.baseUrl
+              token = fresh.botToken
+              buf = ''
+            }
+            continue
+          }
+          buf = batch.get_updates_buf ?? buf
+          this.handleBatch(batch.msgs ?? [])
+          this.status = 'polling'
+        } catch (err) {
+          failures += 1
+          this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s', failures, String(err))
+          await new Promise((r) => setTimeout(r, 2_000))
+        } finally {
+          this.pollAbort = null
+        }
       }
+      this.status = 'stopped'
+    } finally {
+      this.pollRunning = false
     }
-    this.status = 'stopped'
   }
 
   private handleBatch(msgs: InboundMessage[]): void {

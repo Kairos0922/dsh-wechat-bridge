@@ -115,6 +115,7 @@ export declare class WechatGateway extends Service {
         svg: string;
         scanData: string;
     }>;
+    private pollRunning;
     private pollLoop;
     private handleBatch;
     /** Download and decrypt an inbound image (M3: image-in-session). */
