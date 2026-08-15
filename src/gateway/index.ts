@@ -379,7 +379,7 @@ export class WechatGateway extends Service {
         msgId: id ?? null,
         from: senderId,
         itemTypes: (msg.item_list ?? []).map((i) => i.type),
-        text: text.slice(0, 120) || null,
+        text: (text ?? '').slice(0, 120) || null,
       })
       this.ctx.emit('wechat/message', payload)
       if (text) {
