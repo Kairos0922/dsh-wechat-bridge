@@ -38,7 +38,14 @@ export interface SendMessageBody {
         };
     }>;
 }
-/** Send a single text message downstream. Returns the parsed response. */
+/**
+ * Send a single text message downstream. Returns the parsed response.
+ *
+ * The msg must be a COMPLETE WeixinMessage: the official client always fills
+ * `from_user_id: ""`, a per-message `client_id`, `message_type: BOT` and
+ * `message_state: FINISH` — messages missing them are acked (ret=0,
+ * message_id assigned) but never delivered to the WeChat client.
+ */
 export declare function sendMessage(params: {
     baseUrl: string;
     token?: string;
@@ -48,6 +55,7 @@ export declare function sendMessage(params: {
     ret?: number;
     errcode?: number;
     errmsg?: string;
+    message_id?: number;
 }>;
 /** Fetch bot config (includes the typing ticket) for a given user. */
 export declare function getConfig(params: {
