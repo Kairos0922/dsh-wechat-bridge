@@ -128,7 +128,9 @@ export class WechatBridgeNode {
   async createSession(prompt: string, mode?: string): Promise<void> {
     const preset = this.presets.resolveMode(mode, this.resolved.defaultMode)
     const meta: Record<string, string> = {}
-    if (this.resolved.cwd) meta.cwd = this.resolved.cwd
+    // `{{cwd}}` in preset personas resolves from this meta; always provide one
+    // (explicit config wins, otherwise the deployment's working directory).
+    meta.cwd = this.resolved.cwd || process.cwd()
     if (preset) meta.agentPreset = preset
     // Preset personas assemble template variables such as `{{model}}` — an
     // agent created without a model selection fails the assembly. Fall back to
