@@ -68,8 +68,10 @@ plugins:
 - [x] M1 通道：iLink 客户端（QR 登录 / 长轮询 / 文本收发 / typing）＋登录 CLI
 - [x] M2 桥接：白名单 / 多模式动态路由 / 审批 / 长文分段 + 测试
 - [x] M3 图片进会话：CDN 下载 + AES-128-ECB 解密 + 落本机工作区
-- [ ] M3 Web 设置面板：扫码/白名单/模式可视化（进行中）
-- [ ] 发布：安装进 web profile + 端到端联调（需扫码配对）
+- [x] M3 Web 设置面板：网关状态/扫码配对/白名单/模式一览（设置 → 插件 → 微信桥）
+- [ ] 发布：安装进 web profile + allowFrom 配置 + 端到端联调（需扫码配对后执行）
+
+> 本插件为 **web profile 专用**（client 面板 + webServer 端点）；headless 可加载网关但无设置面板。
 
 ## License
 
