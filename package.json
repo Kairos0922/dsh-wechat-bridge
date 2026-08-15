@@ -30,10 +30,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bundle": "tsdown && node scripts/wrap-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"test/*.test.ts\"",
     "login": "node scripts/login.mjs",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build && pnpm bundle"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -48,11 +49,24 @@
   "devDependencies": {
     "@deepseek-ai/dsh-credentials-local": "0.1.0-rc.6",
     "@types/node": "^24.13.3",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^18.3.1",
+    "react": "^18.3.1",
+    "tsdown": "^0.15.8",
     "typescript": "^5.9.0"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
     }
   }
 }

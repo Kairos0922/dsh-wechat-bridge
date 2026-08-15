@@ -21,6 +21,8 @@ import z from '@deepseek-ai/schemastery'
 import { ILINK_BASE_URL, WEIXIN_CDN_BASE_URL } from './gateway/types.ts'
 import { WechatGateway } from './gateway/index.ts'
 import { wechatBridgeNode } from './node/index.ts'
+import { PresetRegistry } from './node/presets.ts'
+import { registerHostApi } from './host-api.ts'
 
 export { WechatGateway } from './gateway/index.ts'
 export { wechatBridgeNode } from './node/index.ts'
@@ -30,7 +32,7 @@ export * from './gateway/types.ts'
 export const name = 'dsh-wechat-bridge'
 
 /** Services the bundle needs (provided by dsh-base). */
-export const inject = ['sessions', 'agents', 'approval', 'credentials']
+export const inject = ['sessions', 'agents', 'approval', 'credentials', 'webServer']
 
 /** Bundle config: gateway fields plus the node's policy. */
 export interface Config {
@@ -103,6 +105,11 @@ export function apply(ctx: Context, config: Config): void {
     agentProvider: config.agentProvider,
     agentModel: config.agentModel,
     mediaDir: config.mediaDir,
+  })
+  // Settings-panel host API: gateway service + stateless node facts.
+  registerHostApi(ctx, ctx.wechat, {
+    resolved: { allowFrom: config.allowFrom ?? [], defaultMode: config.defaultMode },
+    presets: new PresetRegistry(),
   })
 }
 

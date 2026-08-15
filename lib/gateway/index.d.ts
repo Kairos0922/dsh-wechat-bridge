@@ -85,11 +85,29 @@ export declare class WechatGateway extends Service {
     /** Resolve credentials: explicit config first, then the credentials service. */
     resolveCredentials(): Promise<WechatCredentials | null>;
     private boot;
+    /** Persist credentials through the dsh credentials service. */
+    saveCredentials(creds: WechatCredentials): Promise<void>;
+    /** Shared QR pairing loop used by both the CLI login and the settings panel. */
+    private runPairing;
     /**
      * Run the iLink QR login flow. On success returns the credentials; the
      * caller persists them (e.g. via the credentials service).
      */
     loginQr(opts?: LoginQrOptions): Promise<LoginQrResult>;
+    /** Pairing state surfaced to the Web settings panel. */
+    pairingQr: {
+        scanData: string;
+        svg: string;
+    } | null;
+    pairingMessage: string;
+    /**
+     * Start a pairing from the Web settings panel: renders the QR as SVG,
+     * auto-refreshes on expiry, and persists credentials on confirm.
+     */
+    startPairing(): Promise<{
+        svg: string;
+        scanData: string;
+    }>;
     private pollLoop;
     private handleBatch;
     /** Download and decrypt an inbound image (M3: image-in-session). */

@@ -13,6 +13,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import QRCode from 'qrcode'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LOGIN_BASE_URL,
@@ -149,11 +150,22 @@ export class WechatGateway extends Service {
 
   // ---------------------------------------------------------------- QR login
 
-  /**
-   * Run the iLink QR login flow. On success returns the credentials; the
-   * caller persists them (e.g. via the credentials service).
-   */
-  async loginQr(opts: LoginQrOptions = {}): Promise<LoginQrResult> {
+  /** Persist credentials through the dsh credentials service. */
+  async saveCredentials(creds: WechatCredentials): Promise<void> {
+    if (creds.accountId) await this.ctx.credentials.set(credentialRef('WEIXIN_ACCOUNT_ID'), creds.accountId)
+    if (creds.botToken) await this.ctx.credentials.set(credentialRef('WEIXIN_BOT_TOKEN'), creds.botToken)
+    if (creds.baseUrl) await this.ctx.credentials.set(credentialRef('WEIXIN_BASE_URL'), creds.baseUrl)
+  }
+
+  /** Shared QR pairing loop used by both the CLI login and the settings panel. */
+  private async runPairing(opts: {
+    botType?: string
+    timeoutMs?: number
+    qrPollIntervalMs?: number
+    onQr?: (qr: { scanData: string; imgContent?: string }) => void
+    onStatus?: (status: QrLoginStatus | string) => void
+    onConfirmed: (creds: WechatCredentials) => Promise<void>
+  }): Promise<{ success: boolean; credentials?: WechatCredentials; message: string }> {
     const timeoutMs = opts.timeoutMs ?? 5 * 60_000
     const pollIntervalMs = opts.qrPollIntervalMs ?? 1500
     this.status = 'pairing'
@@ -166,18 +178,17 @@ export class WechatGateway extends Service {
     while (Date.now() - startedAt < timeoutMs) {
       const st = await pollQrStatus({ baseUrl, qrcode: qr.qrcode })
       switch (st.status) {
-        case 'confirmed':
-          this.status = 'polling'
-          return {
-            success: true,
-            credentials: {
-              accountId: st.ilink_bot_id,
-              botToken: st.bot_token,
-              baseUrl: st.baseurl || baseUrl,
-              ilinkUserId: st.ilink_user_id,
-            },
-            message: '登录成功',
+        case 'confirmed': {
+          const creds: WechatCredentials = {
+            accountId: st.ilink_bot_id,
+            botToken: st.bot_token,
+            baseUrl: st.baseurl || baseUrl,
+            ilinkUserId: st.ilink_user_id,
           }
+          await opts.onConfirmed(creds)
+          this.status = 'polling'
+          return { success: true, credentials: creds, message: '登录成功' }
+        }
         case 'scaned_but_redirect':
           baseUrl = st.redirect_host ? `https://${st.redirect_host}` : baseUrl
           opts.onStatus?.('scaned_but_redirect')
@@ -192,7 +203,6 @@ export class WechatGateway extends Service {
           opts.onQr?.({ scanData: qr.qrcode, imgContent: qr.qrcode_img_content })
           break
         case 'need_verifycode':
-          // M1: CLI flow can't supply the code interactively; surface and keep polling.
           opts.onStatus?.('need_verifycode')
           break
         case 'verify_code_blocked':
@@ -205,6 +215,61 @@ export class WechatGateway extends Service {
     }
     this.status = 'unauthenticated'
     return { success: false, message: '登录超时' }
+  }
+
+  /**
+   * Run the iLink QR login flow. On success returns the credentials; the
+   * caller persists them (e.g. via the credentials service).
+   */
+  async loginQr(opts: LoginQrOptions = {}): Promise<LoginQrResult> {
+    const result = await this.runPairing({
+      botType: opts.botType,
+      timeoutMs: opts.timeoutMs,
+      qrPollIntervalMs: opts.qrPollIntervalMs,
+      onQr: opts.onQr,
+      onStatus: opts.onStatus,
+      onConfirmed: async () => {},
+    })
+    return result
+  }
+
+  /** Pairing state surfaced to the Web settings panel. */
+  pairingQr: { scanData: string; svg: string } | null = null
+  pairingMessage: string = ''
+
+  /**
+   * Start a pairing from the Web settings panel: renders the QR as SVG,
+   * auto-refreshes on expiry, and persists credentials on confirm.
+   */
+  async startPairing(): Promise<{ svg: string; scanData: string }> {
+    if (this.status === 'pairing') {
+      if (this.pairingQr) return this.pairingQr
+      throw new Error('pairing already in progress')
+    }
+    void this.runPairing({
+      timeoutMs: 10 * 60_000,
+      onQr: (qr) => {
+        void QRCode.toString(qr.scanData, { type: 'svg', margin: 2, width: 420 })
+          .then((svg) => {
+            this.pairingQr = { scanData: qr.scanData, svg }
+          })
+          .catch(() => {})
+      },
+      onStatus: (status) => {
+        this.pairingMessage = String(status)
+      },
+      onConfirmed: async (creds) => {
+        await this.saveCredentials(creds)
+        void this.pollLoop(creds)
+      },
+    })
+    // Wait until the first QR is available.
+    const deadline = Date.now() + 15_000
+    while (!this.pairingQr && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    if (!this.pairingQr) throw new Error('QR 获取超时')
+    return this.pairingQr
   }
 
   // ---------------------------------------------------------------- poll loop
