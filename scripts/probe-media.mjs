@@ -90,6 +90,11 @@ function pngChunk(type, data) {
   return Buffer.concat([len, body, crc])
 }
 function makeTestPng(w = 320, h = 240) {
+  return pngFromRaw(makeTestRaw(w, h), w, h)
+}
+
+/** Raw RGB scanlines (filter byte 0 + RGB), the source for PNG + thumb. */
+function makeTestRaw(w, h) {
   const raw = Buffer.alloc(h * (1 + w * 3))
   for (let y = 0; y < h; y++) {
     const row = y * (1 + w * 3)
@@ -101,6 +106,11 @@ function makeTestPng(w = 320, h = 240) {
       raw[off + 2] = Math.round((y / h) * 255)
     }
   }
+  return raw
+}
+
+/** Encode raw RGB scanlines (w*h, filter byte 0 per row) as a PNG. */
+function pngFromRaw(raw, w, h) {
   const ihdr = Buffer.alloc(13)
   ihdr.writeUInt32BE(w, 0)
   ihdr.writeUInt32BE(h, 4)
@@ -112,6 +122,64 @@ function makeTestPng(w = 320, h = 240) {
     pngChunk('IDAT', zlib.deflateSync(raw)),
     pngChunk('IEND', Buffer.alloc(0)),
   ])
+}
+
+/** 2x2-box downscale of raw RGB scanlines → (tw x th) raw, filter byte 0 per row. */
+function downscaleRaw(raw, w, h, f) {
+  const tw = Math.floor(w / f)
+  const th = Math.floor(h / f)
+  const out = Buffer.alloc(th * (1 + tw * 3))
+  for (let y = 0; y < th; y++) {
+    const row = y * (1 + tw * 3)
+    out[row] = 0
+    for (let x = 0; x < tw; x++) {
+      let r = 0, g = 0, b = 0, n = 0
+      for (let dy = 0; dy < f; dy++) {
+        for (let dx = 0; dx < f; dx++) {
+          const sy = y * f + dy
+          const sx = x * f + dx
+          if (sy >= h || sx >= w) continue
+          const off = sy * (1 + w * 3) + 1 + sx * 3
+          r += raw[off]; g += raw[off + 1]; b += raw[off + 2]; n += 1
+        }
+      }
+      const off = row + 1 + x * 3
+      out[off] = Math.round(r / n)
+      out[off + 1] = Math.round(g / n)
+      out[off + 2] = Math.round(b / n)
+    }
+  }
+  return { raw: out, tw, th }
+}
+
+/** Size-metadata mirroring the official client item (thumb sizes + hd_size). */
+function sizeMetadataFor(image, w, h, ciphertextSize) {
+  const f = 2
+  const { raw: thumbRaw, tw, th } = downscaleRaw(makeTestRaw(w, h), w, h, f)
+  const thumb = pngFromRaw(thumbRaw, tw, th)
+  return {
+    thumb_size: aesEcbPaddedSize(thumb.length),
+    thumb_height: th,
+    thumb_width: tw,
+    hd_size: ciphertextSize,
+  }
+}
+
+/** 320x240 → real phone-photo-like portrait (157x210) gradient. */
+function makePortraitTestPng() {
+  const w = 157, h = 210
+  const raw = Buffer.alloc(h * (1 + w * 3))
+  for (let y = 0; y < h; y++) {
+    const row = y * (1 + w * 3)
+    raw[row] = 0
+    for (let x = 0; x < w; x++) {
+      const off = row + 1 + x * 3
+      raw[off] = Math.round((x / w) * 200) + 30
+      raw[off + 1] = 70 + Math.round((y / h) * 90)
+      raw[off + 2] = Math.round((y / h) * 230) + 20
+    }
+  }
+  return pngFromRaw(raw, w, h)
 }
 
 function parseArgs(argv) {
@@ -132,6 +200,7 @@ function parseArgs(argv) {
     else if (a === '--hermes-flow') args.hermesFlow = true
     else if (a === '--envelope-matrix') args.envelopeMatrix = true
     else if (a === '--consent') args.consent = true
+    else if (a === '--size-metadata') args.sizeMetadata = true
   }
   if (!['current', 'official', 'official-exact', 'mirror'].includes(args.shape)) {
     throw new Error(`unknown --shape '${args.shape}' (current|official|official-exact|mirror)`)
@@ -140,7 +209,7 @@ function parseArgs(argv) {
 }
 
 /** Build the ImageItem — shape A via the production assembler, shape B manually (official capture). */
-function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, filesize, itemFields, fields, noMidSize, encryptType }) {
+function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, filesize, itemFields, fields, noMidSize, encryptType, sizeMetadata, image, imageW, imageH }) {
   let item
   if (shape === 'current') {
     item = buildOutboundMediaItem({
@@ -187,8 +256,13 @@ function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, 
   if (f.includes('ut')) item.update_time_ms = Date.now()
   if (f.includes('ic')) item.is_completed = true
   if (noMidSize && item.image_item) {
-    // 官方客户端 item 没有 mid_size（2026-08-16 入站抓取验证）
     delete item.image_item.mid_size
+  }
+  if (sizeMetadata && item.image_item) {
+    // 官方客户端 item 的尺寸元数据（2026-08-16 完整捕获）:
+    // thumb_size/thumb_height/thumb_width/hd_size —— 我们此前从未发送
+    const meta = sizeMetadataFor(image, imageW, imageH, item.image_item.mid_size ?? filesize)
+    Object.assign(item.image_item, meta)
   }
   return item
 }
@@ -212,9 +286,13 @@ async function main() {
   const to = args.to
   if (!to) throw new Error('--to <userId> required (e.g. the allowlisted WeChat id)')
 
-  const image = args.image ? fs.readFileSync(args.image) : makeTestPng()
+  const image = args.image ? fs.readFileSync(args.image) : (args.sizeMetadata ? makePortraitTestPng() : makeTestPng())
   const fileName = args.image ? path.basename(args.image) : 'probe.png'
-  console.log(`▶ 探针: shape=${args.shape} itemFields=${args.itemFields} to=${to} bytes=${image.length} verify=${args.verify}`)
+  console.log(`▶ 探针: shape=${args.shape} itemFields=${args.itemFields} to=${to} bytes=${image.length} verify=${args.verify} dry=${args.dry}`)
+  if (args.dry) {
+    console.log('⏸ --dry：纯本地模式，不发起任何网络请求。')
+    return
+  }
 
   // ---- step 1: getUploadUrl ------------------------------------------------
   const filekey = randomHex(16)
@@ -267,6 +345,10 @@ async function main() {
     fields: args.fields,
     noMidSize: args.noMidSize,
     encryptType: args.encryptType,
+    sizeMetadata: args.sizeMetadata,
+    image,
+    imageW: 157,
+    imageH: 210,
   })
   console.log('③ item 形状 →', JSON.stringify({ type: item.type, media: item.image_item?.media, mid_size: item.image_item?.mid_size, aeskey: item.image_item?.aeskey }))
   if (args.dry) {
@@ -474,7 +556,7 @@ export async function runHermesFlow(args) {
   const creds = loadCredentials()
   const to = args.to
   if (!to) throw new Error('--to <userId> required')
-  const image = args.image ? fs.readFileSync(args.image) : makeTestPng()
+  const image = args.image ? fs.readFileSync(args.image) : (args.sizeMetadata ? makePortraitTestPng() : makeTestPng())
   const fileName = args.image ? path.basename(args.image) : 'probe.png'
   await sendHermesFlow({ creds, to, ctx: args.contextToken, image, fileName, dry: args.dry })
 }
