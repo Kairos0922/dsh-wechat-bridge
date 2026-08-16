@@ -135,11 +135,11 @@ scripts/dry-run.sh --check  # 同上，自动退出（CI）
 > hermes-agent 文档明确标注该限制在腾讯侧。桥端从未收到任何群事件。
 > `allowGroups` 配置保持就绪，待腾讯对机器人身份开放群事件投递后直接可用。
 
-> **发图片（bot→微信）现状（2026-08-16 活体判定）**：服务器 ack、CDN 内容自取一致，
-> 但微信客户端对 bot 外发媒体 item **静默丢弃**（3 个形状变体手机核对均未收到；
-> item 级字段镜像则被服务器 prepare failed）。根因：客户端只渲染其自生成的 404 字节
-> 签名结构，服务器签发结构（504 字节）不识别——bot 侧无解，参考实现同病。
-> 重测工具与判定边界见 [docs/porting-notes.md](docs/porting-notes.md) §6.1。
+> **发图片（bot→微信）终局判定（2026-08-16 全证据链）**：客户端只渲染其自生成的
+> 404B 签名参数结构，服务器签发结构（upload_param）与任何可过服务器校验的 item
+> 字段组合均被静默丢弃（含完整官方字段镜像 + 尺寸元数据，单发判决实验手机核对）；
+> 官方参考实现（openclaw/hermes）自身形状今天也被服务器拒绝。bot 侧无解。
+> 金丝雀重测条件与工具见 [docs/porting-notes.md](docs/porting-notes.md) §6.1。
 > **入站图片（用户→bot）生产端到端可用**：照片下载 + AES 解密落盘实测通过。
 
 > 本插件为 **web profile 专用**（client 面板 + webServer 端点）；headless 可加载网关但无设置面板。

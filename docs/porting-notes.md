@@ -103,25 +103,35 @@
 | G | C + 仅 is_completed | **prepare failed** | — |
 | H | **官方源码逐字段镜像**（Tencent/openclaw-weixin `sendImageMessageWeixin`：xep + base64(原始字节) + encrypt_type:1 + mid_size，无 full_url/aeskey）+ ctx | **prepare failed** | — |
 | I | H 去掉 encrypt_type | **prepare failed** | — |
+| K | mirror（upload_param + 44key + full_url + aeskey）去掉 mid_size | **prepare failed** → mid_size 为服务器必需字段 | — |
+| L | mirror + encrypt_type:1 | **prepare failed** | — |
+| J | 官方源码形状修正版（xep + 44字符key + encrypt_type:1 + mid_size，即 hermes/openclaw 真形状） | **prepare failed** | — |
+| M | **hermes-flow 逐字段复刻**（hermes-agent 0.19.0 weixin.py 全流程：client version 2.2.0、base_info 仅 channel_version、caption 先行、xep 引用） | **连 caption 纯文本都 prepare failed** | — |
+| N | **单发判决（用户许可窗口）**：生产形状 + thumb_size/thumb_height/thumb_width/hd_size 尺寸元数据（2026-08-16 完整捕获官方 item 发现我们缺失的唯一字段）+ 新 bot 新鲜 ctx | ack (message_id) | **静默丢弃**（新 bot 身份、手机核对） |
 
 - **item 级字段二分**：官方客户端入站 item 带 create_time_ms/update_time_ms/is_completed，
   但 **bot 发送带任一字段即 prepare failed**——服务器对 bot 出站媒体 item 有独立校验，
   bot 形状必须**不带**这三个字段（我们原始形状正确，勿照抄客户端入站 item 全字段）。
+- **完整捕获修正（2026-08-16 19:35，media-captures.jsonl）**：官方客户端 item **有 mid_size
+  与 thumb_size/thumb_height/thumb_width/hd_size**（此前 1200 字符截断日志误导为无），
+  无 thumb_media、无 encrypt_type、无 item 级可复刻差异。尺寸元数据补发后仍静默丢弃（探针 N）。
 - **官方源码形状今天被服务器拒绝**：按 Tencent/openclaw-weixin `sendImageMessageWeixin`
   （v2.4.5，`src/messaging/send.ts`）逐字段镜像（xep + 24 字符 key + encrypt_type:1 +
-  mid_size），服务器直接 prepare failed——**官方参考实现自己的形状都过不了今天的服务器校验**，
-  且今晨矩阵同组合还曾 ack（"气泡送达已过期"），说明**服务器侧参数格式/校验今天仍在变化**
-  （upload_param 495B→672B、xep 404B→366B），服务器接受的形状客户端不渲染（A/B/C 静默丢弃），
-  客户端能渲染的形状服务器拒绝（H/I/D–G prepare failed）。
-- **官方客户端 item 没有 mid_size**（入站抓取验证），但保留 mid_size 不影响 ack。
+  mid_size），服务器直接 prepare failed——**官方参考实现自己的形状都过不了今天的服务器校验**。
+  hermes-agent 0.19.0 全流程逐字段复刻（含其信封/版本头/caption 先行）连纯文本都被拒——
+  两个"支持媒体"的参考实现的当前形状在今天的后端上均不可用，与"今天后端在迁移"一致。
 - **结构解码**：官方客户端 encrypt_query_param = base64( base64url( 404 字节二进制 ) )，
-  服务器签发 upload_param = base64( base64url( 504 字节二进制 ) )——两者结构不同，
-  客户端渲染器只认客户端生成结构；服务器侧两种结构均可下载（自下载闭环均 200+解密一致），
-  说明门禁在**客户端渲染/取流侧**，不在 CDN。
+  服务器签发 upload_param = base64( base64url( 495–672 字节二进制，请求间可变 ) )——两者
+  结构不同，客户端渲染器只认客户端生成结构；服务器侧两种结构均可下载（自下载闭环均
+  200+解密一致），说明门禁在**客户端渲染/取流侧**，不在 CDN。
 - **入站方向实测通过**：用户手机发照片 → bot 经 full_url 下载 + AES 解密落盘成功
   （`media/<session>/wechat-*.jpg` 为真实 JPEG）——M3 链路生产端到端可用。
 
-**判定边界（终局）**：bot→微信 外发图片当前被客户端渲染门禁锁定（客户端只渲染其自生成
-404B 签名结构；服务器签发结构与任何 item 字段组合均无法送达可看图）。bot 侧无解；
-重测工具 = `node scripts/probe-media.mjs --shape current --ctx <token> --to <userId>`，
-当某次探针在端上出现气泡且可打开时即门禁解除。
+**判定边界（终局，2026-08-16 全证据链）**：bot→微信 外发图片被客户端渲染门禁锁定——
+客户端只渲染其自生成的 404B 签名结构；服务器签发结构（upload_param/xep）与任何可过
+服务器校验的 item 字段组合均被客户端静默丢弃（A/B/C/N），而官方客户端形状与参考实现
+形状（openclaw/hermes）在今天的服务器校验下被拒（D–M）。bot 侧无解；协议保持对齐、
+代码保持服务器接受的唯一形状。**金丝雀重测条件**：`getUploadUrl` 的 upload_param 内层
+尺寸（当前 495–672B）与官方客户端 404B 结构对齐时，或官方客户端捕获结构变化时，按
+本矩阵重测即可开关；被动捕获（media-captures.jsonl）与探针工具（scripts/probe-media.mjs，
+带 --consent 门）均就位。
