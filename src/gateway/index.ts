@@ -633,19 +633,17 @@ export class WechatGateway extends Service {
         cdnBaseUrl: this.c.cdnBaseUrl,
         aeskey,
       })
-      const uploadParam = slot.upload_param?.trim()
-      if (!uploadParam) {
-        return { ok: false, errmsg: 'getUploadUrl returned no upload_param', retryable: false }
+      if (!downloadParam) {
+        return { ok: false, errmsg: 'CDN upload returned no x-encrypted-param', retryable: false }
       }
-      // full_url must be ABSOLUTE (official-client mirror). Config default is
-      // WEIXIN_CDN_BASE_URL; the fallback guards deployments that pinned an
-      // empty cdnBaseUrl before the default existed (see porting-notes §6).
-      const cdnBase = this.c.cdnBaseUrl || WEIXIN_CDN_BASE_URL
+      // Official outbound shape (verified end-to-end 2026-08-17): the CDN
+      // upload response header is the download reference; getUploadUrl's
+      // upload_param is NOT recognized by the client renderer (see
+      // porting-notes §6.1 FINAL).
       const item = buildOutboundMediaItem({
         mediaType: params.mediaType,
-        uploadParam,
+        xep: downloadParam,
         aeskey,
-        cdnBaseUrl: cdnBase,
         rawsize,
         fileName: params.fileName,
       })

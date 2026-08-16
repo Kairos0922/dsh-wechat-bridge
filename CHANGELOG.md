@@ -7,6 +7,13 @@
 
 ### 新增
 
+- **bot → 微信 媒体外发打通（终局，2026-08-17）**：官方形状
+  （`xep + aes_key=base64(hex)44字符 + encrypt_type:1 + mid_size`）端上验证成功，
+  手机正常显示图片。生产 `buildOutboundMediaItem` 已改为官方形状；`/export`、`/card`、
+  长文转文件（`fileThresholdChars>0`）立即可用。根因定案（此前"客户端渲染门禁"结论
+  推翻）：旧形状用 `upload_param` 当下载引用 + 自创 `full_url`/`image_item.aeskey`
+  附加字段 + 缺 `encrypt_type`；`ret=-2` 实为限流/会话错误（openclaw #216 印证）。
+  详见 docs/porting-notes.md §6.2。
 - **Markdown 渲染实测矩阵（P1）**：生产通道单发验证 h1-h4/粗体/斜体/行内代码/
   列表/引用块/表格/代码块/分隔线/链接全部正常；确认 **CJK 斜体**为已知边界
   （中文字体无斜体，标记可能透出 → filter 模式剥离），见 docs/markdown-matrix.md。

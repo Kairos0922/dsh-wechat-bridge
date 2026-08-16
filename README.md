@@ -63,7 +63,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 
 ## 已知限制（实测结论）
 
-- **bot → 微信 发图片/附件暂不可用**：微信客户端只渲染其客户端自生成的媒体参数结构，服务器签发的结构会被静默丢弃；官方参考实现（openclaw / hermes）当前同样不通。判定证据与金丝雀重测条件见 [docs/porting-notes.md §6.1](docs/porting-notes.md)。**入站图片（微信 → bot）完全可用。**
+- **bot → 微信 发图片/附件已打通**（2026-08-17 端上验证：官方形状 xep + base64(hex) key + encrypt_type:1 + mid_size，手机正常显示；`/export`、`/card`、长文转文件立即可用）。判定过程与历史矩阵见 [docs/porting-notes.md §6](docs/porting-notes.md)。**入站图片（微信 → bot）同样可用。** 视频/语音未端上验证。
 - **群聊**：iLink 机器人身份暂无法被拉入普通微信群（腾讯侧限制），`allowGroups` 已就绪待开放。
 - **工具进度卡片**：当前微信后端对卡片 item 静默丢弃，默认关闭（`progressToolPrefixes: []`），后端支持后填前缀即可启用。
 - **限流**：微信通道无限流公开数字，出站队列自适应退避，请勿高频连发。

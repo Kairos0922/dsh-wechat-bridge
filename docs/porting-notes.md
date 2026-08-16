@@ -135,3 +135,37 @@
 尺寸（当前 495–672B）与官方客户端 404B 结构对齐时，或官方客户端捕获结构变化时，按
 本矩阵重测即可开关；被动捕获（media-captures.jsonl）与探针工具（scripts/probe-media.mjs，
 带 --consent 门）均就位。
+
+### §6.2 终局推翻与根因定案（2026-08-17，端上验证成功）
+
+> ⚠️ **§6 与 §6.1 的"客户端渲染门禁"结论错误，本节推翻之。** 历史矩阵保留作考古，
+> 判定以本节为准。
+
+**单发验证（用户开窗口，官方形状一发即中）**：
+`xep(CDN 上传响应头) + aes_key=base64(hex字符串)44字符 + encrypt_type:1 + mid_size`，
+openclaw 2.4.6 头环境（iLink-App-ClientVersion=132102、base_info.channel_version=2.4.6、
+无 context_token）→ 服务器 ack（message_id）→ **手机端正常显示**。
+
+**根因定案（为什么本地此前全灭）**：
+1. **`encrypt_query_param` 必须用 CDN 上传响应头 `x-encrypted-param`**，本地生产形状用的
+   getUploadUrl `upload_param` 不是客户端认识的下载引用（A/C/N 静默丢弃的根因）。
+2. **`full_url`、`image_item.aeskey` 是本地自创附加字段，官方形状不带**——B 变体（带
+   full_url/aeskey）手机端渲染不稳定（早间送达/晚间丢弃），去掉后稳定。
+3. **`encrypt_type:1` 是服务器 item 校验必需**（本地旧形状缺失）。
+4. **`aes_key` 必须 base64(hex字符串) 44 字符**——24 字符 base64(原始字节) 导致接收端
+   解密失败（hermes 源码注释"grey boxes"同因；本地 B 变体"无法下载/已过期"即此）。
+5. **`ret=-2` 是限流/会话类业务错误，不是形状被拒**——openclaw 官方 issue #216
+   （连续媒体发送触发 ret=-2，paced 即成功）+ hermes 源码（RATE_LIMIT_ERRCODE=-2，
+   errmsg="unknown error" = stale session）双重印证。探针 D–M 的连续轰炸触发的正是它。
+6. **本地"xep 下载 400"是 bot 侧自拼 URL 缺 `taskid` 参数**（官方 full_url 带 taskid）；
+   下载 URL 由客户端构造（客户端生成 taskid），bot 无需也不能生成——不影响发送可行性。
+   只读验证（2026-08-17）：upload_param 可作下载参数（200 解密一致），但客户端渲染器
+   不认 upload_param 作消息引用；xep bot 侧自测 400，客户端侧可取流（端上验证成功）。
+
+**生产代码（2026-08-17 起）**：`buildOutboundMediaItem` = 官方形状（xep + 44key +
+encrypt_type:1 + mid_size / file_item{file_name,len}），`src/gateway/index.ts` 上传后直接
+用 `uploadBufferToCdn` 的 `downloadParam`。`/export`、`/card`、长文转文件（fileThresholdChars>0）
+全部走此形状，立即可用。
+
+**残余问题**：视频（video_item 需 play_length/video_md5）与语音（voice_item 需
+encode_type/sample_rate 等）未端上验证；`taskid` 生成规则未逆向（客户端侧逻辑，bot 不需要）。

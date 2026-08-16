@@ -8,7 +8,7 @@ import test from 'node:test'
 import { aesEcbPaddedSize, buildCdnUploadUrl, buildOutboundMediaItem, encodeMediaAesKey, encryptAesEcb, md5Hex, randomHex } from '../src/gateway/upload.ts'
 import { selectExpiredFiles } from '../src/node/retention.ts'
 import { decryptAesEcb } from '../src/gateway/media.ts'
-import { ITEM_FILE, ITEM_IMAGE, UPLOAD_MEDIA_FILE, UPLOAD_MEDIA_IMAGE, WEIXIN_CDN_BASE_URL } from '../src/gateway/types.ts'
+import { ITEM_FILE, ITEM_IMAGE, UPLOAD_MEDIA_FILE, UPLOAD_MEDIA_IMAGE } from '../src/gateway/types.ts'
 
 test('encodeMediaAesKey is base64 of the HEX STRING (official-client shape)', () => {
   const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
@@ -62,25 +62,24 @@ test('buildOutboundMediaItem (IMAGE) mirrors the official outbound shape', () =>
   const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
   const item = buildOutboundMediaItem({
     mediaType: UPLOAD_MEDIA_IMAGE,
-    uploadParam: 'long-upload-param',
+    xep: 'x-encrypted-param-header',
     aeskey: key,
-    cdnBaseUrl: WEIXIN_CDN_BASE_URL,
     rawsize: 100,
     fileName: 'card.png',
   })
   assert.equal(item.type, ITEM_IMAGE)
   const media = item.image_item?.media
   assert.ok(media, 'image must carry media')
-  assert.equal(media.encrypt_query_param, 'long-upload-param')
+  // encrypt_query_param = CDN upload response header (verified end-to-end 2026-08-17)
+  assert.equal(media.encrypt_query_param, 'x-encrypted-param-header')
   // aes_key = base64 of the HEX STRING (44 chars), NOT raw bytes (24 chars)
   assert.equal(media.aes_key, encodeMediaAesKey(key))
   assert.equal(media.aes_key.length, 44)
-  // full_url must be an ABSOLUTE download URL built from cdnBaseUrl
-  assert.equal(media.full_url, `${WEIXIN_CDN_BASE_URL}/download?encrypted_query_param=long-upload-param`)
-  // NO encrypt_type (official outbound shape carries none)
-  assert.equal(media.encrypt_type, undefined)
-  // image extras: raw hex aeskey + ciphertext-size mid_size
-  assert.equal(item.image_item?.aeskey, key.toString('hex'))
+  // encrypt_type = 1 (server item validation requires it)
+  assert.equal(media.encrypt_type, 1)
+  // NO full_url, NO image_item.aeskey — local inventions that caused silent drops
+  assert.equal(media.full_url, undefined)
+  assert.equal(item.image_item?.aeskey, undefined)
   assert.equal(item.image_item?.mid_size, aesEcbPaddedSize(100))
 })
 
@@ -88,9 +87,8 @@ test('buildOutboundMediaItem (FILE) mirrors the official outbound shape', () => 
   const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
   const item = buildOutboundMediaItem({
     mediaType: UPLOAD_MEDIA_FILE,
-    uploadParam: 'long-upload-param',
+    xep: 'x-encrypted-param-header',
     aeskey: key,
-    cdnBaseUrl: WEIXIN_CDN_BASE_URL,
     rawsize: 1234,
     fileName: 'answer.md',
   })
@@ -98,7 +96,7 @@ test('buildOutboundMediaItem (FILE) mirrors the official outbound shape', () => 
   assert.equal(item.file_item?.file_name, 'answer.md')
   // file len = RAW size as string (not ciphertext size)
   assert.equal(item.file_item?.len, '1234')
-  assert.equal(item.file_item?.media?.full_url?.startsWith('https://'), true)
-  assert.equal(item.file_item?.media?.encrypt_type, undefined)
+  assert.equal(item.file_item?.media?.full_url, undefined)
+  assert.equal(item.file_item?.media?.encrypt_type, 1)
   assert.equal(item.file_item?.media?.aes_key?.length, 44)
 })

@@ -17,10 +17,10 @@
  * 每个步骤的服务器返回原样打印；`--verify` 追加服务器侧自下载闭环（下载→解密→比对 md5）。
  *
  * 形状变体：
- *   --shape current  (默认) 生产代码形状：encrypt_query_param=upload_param + aes_key=base64(hex 字符串,44字符)
- *                            + full_url(绝对) + image_item.aeskey(hex)（buildOutboundMediaItem 组装）
- *   --shape official       官方客户端入站抓取形状：encrypt_query_param=CDN 响应 x-encrypted-param
- *                           + aes_key=base64(原始16字节,24字符) + full_url(绝对) + image_item.aeskey(hex)
+ *   --shape current  (默认) 生产代码形状（= 官方形状，2026-08-17 端上验证通过）：
+ *                            encrypt_query_param=CDN 响应 x-encrypted-param + aes_key=base64(hex 字符串,44字符)
+ *                            + encrypt_type:1 + mid_size（buildOutboundMediaItem 组装）
+ *   --shape official       历史形状（2026-08-16 入站抓取）：xep + base64(原始16字节,24字符) + full_url + aeskey(hex)
  *
  * 矩阵记录：docs/porting-notes.md §6。判定边界：A/B 各一发，端上可见性以手机核对为准。
  *
@@ -212,11 +212,13 @@ function parseArgs(argv) {
 function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, filesize, itemFields, fields, noMidSize, encryptType, sizeMetadata, image, imageW, imageH }) {
   let item
   if (shape === 'current') {
+    // 生产形状（2026-08-17 起 = 官方形状，端上已验证）:
+    //   media = { encrypt_query_param: xep, aes_key: base64(hex)44字符, encrypt_type: 1 }
+    //   image_item = { media, mid_size }；无 full_url、无 image_item.aeskey
     item = buildOutboundMediaItem({
       mediaType: UPLOAD_MEDIA_IMAGE,
-      uploadParam,
+      xep,
       aeskey,
-      cdnBaseUrl,
       rawsize,
       fileName: 'probe.png',
     })
