@@ -144,15 +144,19 @@ scripts/dry-run.sh --check  # 同上，自动退出（CI）
 
 > 本插件为 **web profile 专用**（client 面板 + webServer 端点）；headless 可加载网关但无设置面板。
 
-## 发布前提（发布前需 Kairos 决策）
+## 开源状态（2026-08-16 决策）
 
-代码与构建已 publish-ready。**发布到 npm / 公共仓库属云端行为**，与 kairos-life「永不云端」红线冲突——是否开源发布、以什么形式，由 Kairos 单独决策后执行；未决策前仅在本仓库内维护。
+- **渠道**：仅 GitHub 公开仓库（准备中，导出/推送由 Kairos 单独点头后执行）；**npm 暂缓**——
+  包名 `dsh-wechat-bridge` 已被他人在 npm 占用（2026-08-14），如未来发布 npm 需改名或协调。
+- 代码与构建已 publish-ready（`pnpm verify` 全绿、`prepublishOnly` 已接）。
+- 版权署名暂保持现状；完整决策与发布预检清单见
+  `docs/internal/2026-08-16-wechat-bridge-open-source.md`（仅本仓库内维护时可见）。
 
 ## 文档
 
 - [CHANGELOG.md](CHANGELOG.md)
 - [docs/porting-notes.md](docs/porting-notes.md) — 相对 Tencent/openclaw-weixin 的逐字段移植对照表（升级 diff 清单）
-- [docs/upgrade-runbook.md](docs/upgrade-runbook.md) — 生产上线手册（离线验证 → 重启 → 微信端验收清单 → 回滚）
+- [docs/upgrade-runbook.md](docs/upgrade-runbook.md) — 生产上线手册（**维护者内部**：离线验证 → 重启 → 微信端验收清单 → 回滚）
 - [docs/harness-patch.md](docs/harness-patch.md) — DSH harness 补丁记录（origin 徽标，升级 DSH 后需重打）
 
 ## License
