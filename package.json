@@ -74,5 +74,6 @@
       ],
       "platform": "web"
     }
-  }
+  },
+  "packageManager": "pnpm@10.34.5"
 }
