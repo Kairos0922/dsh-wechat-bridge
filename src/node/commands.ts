@@ -197,10 +197,18 @@ export const COMMANDS: CommandSpec[] = [
           ? `限流暂停中（约 ${Math.round((paused - Date.now()) / 1000)}s）`
           : `正常（队列 ${node.outbox.pendingCount()} 条）`
       const usage = tokenUsageSummary(session)
+      const pairedId = await node.getPairedUserId()
+      const allowFrom = node.resolved.allowFrom
+      const trustLine =
+        pairedId !== null
+          ? `配对账号: ${pairedId}${allowFrom.length > 0 ? '（allowFrom 已配置）' : '（扫码自动白名单）'}`
+          : allowFrom.length > 0
+            ? `白名单: ${allowFrom.length} 人（allowFrom 配置）`
+            : '白名单: 未配对且未配置（无人可进）'
       await sendTextToPeer(
         node,
         peerId,
-        `📊 状态\n会话: ${session.id}\nagent: ${agent?.status ?? 'idle'}\n事件: ${session.seq} 条 · 最近: ${reason}\n模型偏好: ${modelLine}\n工作区偏好: ${cwdLine}\n出站: ${queueLine}${usage ? `\n本轮 token: ${usage}` : ''}`,
+        `📊 状态\n会话: ${session.id}\nagent: ${agent?.status ?? 'idle'}\n事件: ${session.seq} 条 · 最近: ${reason}\n模型偏好: ${modelLine}\n工作区偏好: ${cwdLine}\n出站: ${queueLine}${usage ? `\n本轮 token: ${usage}` : ''}\n${trustLine}\n📷 发图通道: 后端受限（入站图片正常）`,
         { kind: 'system' },
       )
     },

@@ -66,6 +66,11 @@ declare module '@deepseek-ai/cordis' {
         'wechat/message'(payload: InboundEvent): void;
         /** Gateway connection status changed. */
         'wechat/status'(status: GatewayStatus): void;
+        /** A QR pairing was confirmed — the pairer's WeChat id is the trust anchor. */
+        'wechat/paired'(payload: {
+            userId: string;
+            accountId: string | null;
+        }): void;
     }
 }
 export declare class WechatGateway extends Service {

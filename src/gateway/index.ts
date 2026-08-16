@@ -111,6 +111,8 @@ declare module '@deepseek-ai/cordis' {
     'wechat/message'(payload: InboundEvent): void
     /** Gateway connection status changed. */
     'wechat/status'(status: GatewayStatus): void
+    /** A QR pairing was confirmed — the pairer's WeChat id is the trust anchor. */
+    'wechat/paired'(payload: { userId: string; accountId: string | null }): void
   }
 }
 
@@ -254,6 +256,11 @@ export class WechatGateway extends Service {
           }
           await opts.onConfirmed(creds)
           this.status = 'polling'
+          // Product event: the pairer's WeChat id is now the trust anchor —
+          // the bridge node reacts with a first-run welcome message.
+          if (creds.ilinkUserId) {
+            this.ctx.emit('wechat/paired', { userId: creds.ilinkUserId, accountId: creds.accountId ?? null })
+          }
           return { success: true, credentials: creds, message: '登录成功' }
         }
         case 'scaned_but_redirect':

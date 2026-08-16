@@ -84,6 +84,24 @@ export function newSessionId(): SessionId {
   return SessionId(`wechat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
 }
 
+/** First-run welcome message sent to the pairer right after QR confirmation. */
+export function buildWelcomeMessage(opts: { allowFromEmpty: boolean }): string {
+  const trust = opts.allowFromEmpty
+    ? '🔓 你已通过扫码自动获得白名单，可直接使用。'
+    : '🔒 白名单已按配置生效，可直接使用。'
+  return [
+    '✅ 微信桥配对成功，欢迎使用！',
+    trust,
+    '',
+    '快速上手：',
+    '· 发送 /modes 查看全部可用模式（回复编号直接开会话）',
+    '· 发送 /new <模式> <任务> 指定模式开会话',
+    '· /status 查看会话与通道状态 · /help 查看全部命令',
+    '',
+    '提示：危险操作会先征求你的批准（/yes 或 /no），放心使用。',
+  ].join('\n')
+}
+
 /** One numbered choice menu pending for a peer. */
 export interface PendingMenu {
   kind: 'mode' | 'provider' | 'model' | 'workspace'
@@ -156,6 +174,18 @@ export class WechatBridgeNode {
     this.disposers.push(
       this.ctx.on('wechat/message', (payload: InboundEvent) => {
         void handleInbound(this, payload)
+      }),
+    )
+    // First-run experience: a freshly confirmed pairing pushes a welcome
+    // message straight into the pairer's chat — zero-config onboarding.
+    this.disposers.push(
+      this.ctx.on('wechat/paired', (payload: { userId: string; accountId: string | null }) => {
+        if (!payload.userId) return
+        this.enqueueText(
+          payload.userId,
+          buildWelcomeMessage({ allowFromEmpty: this.resolved.allowFrom.length === 0 }),
+          { kind: 'system' },
+        )
       }),
     )
     // Migration: sessions created before per-peer binding (id prefix `wechat-`,

@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { WechatBridgeNode } from '../src/node/core.ts'
+import { buildWelcomeMessage, WechatBridgeNode } from '../src/node/core.ts'
 
 const CONFIG = {
   allowFrom: ['peer-a@im.wechat'],
@@ -85,4 +85,16 @@ test('isAllowed: empty allowFrom and no pairing → nobody is allowed (safe defa
   const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
   assert.equal(await node.isAllowed('anyone@im.wechat'), false)
   node.dispose()
+})
+
+test('buildWelcomeMessage: auto-allowlist mode states the trust source', () => {
+  const msg = buildWelcomeMessage({ allowFromEmpty: true })
+  assert.match(msg, /配对成功/)
+  assert.match(msg, /扫码自动获得白名单/)
+  assert.match(msg, /\/modes/)
+})
+
+test('buildWelcomeMessage: configured allowFrom mode', () => {
+  const msg = buildWelcomeMessage({ allowFromEmpty: false })
+  assert.match(msg, /白名单已按配置生效/)
 })

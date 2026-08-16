@@ -75,6 +75,10 @@ export interface ResolvedNodeConfig {
 }
 /** Default session id prefix for /new-created sessions. */
 export declare function newSessionId(): SessionId;
+/** First-run welcome message sent to the pairer right after QR confirmation. */
+export declare function buildWelcomeMessage(opts: {
+    allowFromEmpty: boolean;
+}): string;
 /** One numbered choice menu pending for a peer. */
 export interface PendingMenu {
     kind: 'mode' | 'provider' | 'model' | 'workspace';
