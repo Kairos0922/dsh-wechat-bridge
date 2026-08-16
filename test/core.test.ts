@@ -61,3 +61,28 @@ test('dispose clears menus and pending outbox entries without throwing', () => {
   node.dispose()
   assert.equal(node.outbox.pendingCount(), 0)
 })
+
+test('isAllowed: configured allowFrom wins even without a paired id', async () => {
+  const node = new WechatBridgeNode({} as never, CONFIG)
+  assert.equal(await node.isAllowed('peer-a@im.wechat'), true)
+  assert.equal(await node.isAllowed('stranger@im.wechat'), false)
+  node.dispose()
+})
+
+test('isAllowed: the paired (QR-scanning) WeChat id is auto-allowlisted', async () => {
+  const credentials = {
+    resolve: async () => ({ value: 'owner-123@im.wechat' }),
+  }
+  const ctx = { logger: { warn() {} }, get: () => credentials }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
+  assert.equal(await node.isAllowed('owner-123@im.wechat'), true)
+  assert.equal(await node.isAllowed('stranger@im.wechat'), false)
+  node.dispose()
+})
+
+test('isAllowed: empty allowFrom and no pairing → nobody is allowed (safe default)', async () => {
+  const ctx = { logger: { warn() {} }, get: () => undefined }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
+  assert.equal(await node.isAllowed('anyone@im.wechat'), false)
+  node.dispose()
+})

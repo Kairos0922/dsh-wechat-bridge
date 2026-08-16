@@ -17,6 +17,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { InboundEvent, MessageItem } from '../gateway/types.ts'
 import { attachApprovalBridge, type PendingApproval } from './approvals.ts'
 import { listSessions, routeCommand } from './commands.ts'
@@ -119,10 +120,15 @@ export class WechatBridgeNode {
   constructor(ctx: Context, config: ResolvedNodeConfig) {
     this.ctx = ctx
     this.resolved = config
-    if (!Array.isArray(config.allowFrom) || config.allowFrom.length === 0) {
-      throw new Error(
-        'dsh-wechat-bridge: allowFrom is REQUIRED and must list at least one WeChat sender id. ' +
-          'An agent that accepts instructions from any WeChat contact is a prompt-injection front door.',
+    // allowFrom is OPTIONAL since 0.2.x: the QR pairing itself is the trust
+    // action — the pairer's WeChat id (WEIXIN_ILINK_USER_ID) is auto-allowlisted
+    // at runtime (see isAllowed). allowFrom stays as an extra restriction /
+    // multi-user gate for power users.
+    if (Array.isArray(config.allowFrom) && config.allowFrom.length === 0) {
+      this.ctx.logger.warn(
+        '[dsh-wechat-bridge] allowFrom is empty — relying on the paired WeChat id as the sole trusted sender. ' +
+          'An agent that accepts instructions from any WeChat contact is a prompt-injection front door; ' +
+          'only the account that scanned the pairing QR is trusted.',
       )
     }
     this.state = new BridgeState()
@@ -292,9 +298,49 @@ export class WechatBridgeNode {
     return this.sessionOwners.has(agent.session.id)
   }
 
-  /** Whether a WeChat sender may drive the bridge. */
-  isAllowed(senderId: string): boolean {
-    return this.resolved.allowFrom.includes(senderId)
+  /** Public accessor for the status panel: the pairer's auto-allowlisted id. */
+  async getPairedUserId(): Promise<string | null> {
+    return this.pairedUserId()
+  }
+
+  /** The pairer's WeChat id (auto-allowlisted), read from credentials. */
+  private pairedUserIdCache: string | null = null
+  private pairedUserIdAt = 0
+  private readonly pairedUserIdTtlMs = 30_000
+
+  /**
+   * The WeChat id of the account that scanned the pairing QR — the implicit
+   * owner/trust anchor. Cached briefly; refreshed after a (re)pairing takes
+   * effect within one TTL.
+   */
+  private async pairedUserId(): Promise<string | null> {
+    const now = Date.now()
+    if (this.pairedUserIdCache !== null && now - this.pairedUserIdAt < this.pairedUserIdTtlMs) {
+      return this.pairedUserIdCache
+    }
+    let id: string | null = null
+    try {
+      // Typed via the dsh-credentials Context augmentation (same service the
+      // gateway injects); resolved as an optional service at runtime.
+      const credentials = this.ctx.get('credentials') as
+        | { resolve(ref: ReturnType<typeof credentialRef>): Promise<{ value?: unknown } | undefined> }
+        | undefined
+      const resolved = await credentials?.resolve(credentialRef('WEIXIN_ILINK_USER_ID'))
+      const value = resolved?.value
+      id = typeof value === 'string' && value.trim() ? value.trim() : null
+    } catch {
+      id = null
+    }
+    this.pairedUserIdCache = id
+    this.pairedUserIdAt = now
+    return id
+  }
+
+  /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ the pairer. */
+  async isAllowed(senderId: string): Promise<boolean> {
+    if (this.resolved.allowFrom.includes(senderId)) return true
+    const owner = await this.pairedUserId()
+    return owner !== null && senderId === owner
   }
 
   /** Set (and persist) the peer's active session. */

@@ -136,8 +136,20 @@ export declare class WechatBridgeNode {
     activeAgent(peerId: string): Agent | undefined;
     /** Whether this node drives the given agent (its session belongs to a peer). */
     ownsAgent(agent: Agent): boolean;
-    /** Whether a WeChat sender may drive the bridge. */
-    isAllowed(senderId: string): boolean;
+    /** Public accessor for the status panel: the pairer's auto-allowlisted id. */
+    getPairedUserId(): Promise<string | null>;
+    /** The pairer's WeChat id (auto-allowlisted), read from credentials. */
+    private pairedUserIdCache;
+    private pairedUserIdAt;
+    private readonly pairedUserIdTtlMs;
+    /**
+     * The WeChat id of the account that scanned the pairing QR — the implicit
+     * owner/trust anchor. Cached briefly; refreshed after a (re)pairing takes
+     * effect within one TTL.
+     */
+    private pairedUserId;
+    /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ the pairer. */
+    isAllowed(senderId: string): Promise<boolean>;
     /** Set (and persist) the peer's active session. */
     setActiveSession(peerId: string, sessionId: SessionId | null): void;
     /** Sessions this peer owns, most-recent-first. */

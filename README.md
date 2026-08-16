@@ -8,7 +8,7 @@
 
 - **多模式动态路由**：`/modes` 列出你 DSH 里的全部 agent 预设（财务助理、事业军师、生活管家……），回复编号直接开会话，不写死任何角色
 - **移动端完整体验**：Markdown 保真渲染、思考进度心跳、任务清单快照、编号菜单、长文自动分段
-- **安全边界**：`allowFrom` 硬白名单（白名单外消息直接丢弃，绝不喂给模型）；危险操作经审批，微信里 `/yes` `/no` 或回复编号即决
+- **安全边界**：扫码配对即自动白名单（谁扫码谁可信，白名单外消息直接丢弃，绝不喂给模型）；危险操作经审批，微信里 `/yes` `/no` 或回复编号即决
 - **微信 ⇄ 图片**：微信发来的图片经 CDN 下载、AES 解密后落本机工作区，交给 agent 处理（入站图片生产可用）
 - **工程化底座**：限流感知出站队列（自动退避）、typing 缓存、断线重连、持久化去重、崩溃可恢复
 - **Web 设置面板**：扫码配对、白名单、模式一览、桥内偏好（模型/工作区）、出站队列状态——不用碰终端
@@ -17,7 +17,7 @@
 
 前置：本机已安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh` CLI 可用）。
 
-**一步安装**（自动注册为 profile 插件层）：
+**第 1 步：安装**（自动注册为 profile 插件层，装完重启 `dsh web`）：
 
 ```sh
 dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
@@ -25,23 +25,11 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 
 > 若你的 profile 不叫 `web`，把 `--profile web` 换成你的 profile 名。
 
-装完还有三件必做（一次性）：
+**第 2 步：扫码配对**——打开 DSH Web 界面 → 设置面板 → 插件 → 微信桥 → 「扫码配对」，用你的微信扫码确认。
 
-**1. 配白名单**——编辑 `~/.dsh/profiles/web/cordis.patch.yml`（你的 profile 对应路径），加：
+> **白名单全自动**：扫码本身就是信任动作——谁扫码，谁的微信 id 就被自动加入白名单（存为 `WEIXIN_ILINK_USER_ID` 凭证），配好即可用，无需手写配置。`allowFrom` 仅在你需要限制更多/多用户时使用（见下表）。
 
-```yaml
-- id: dsh-wechat-bridge
-  config:
-    allowFrom: ["<你的微信id>"]   # 必填！白名单外任何人发消息都会被忽略
-    defaultMode: standard         # 可选：/new 不带模式时的默认预设
-    cwd: /path/to/workspace       # 可选：会话默认工作目录
-```
-
-**2. 重启** `dsh web`（或按你的部署习惯重启服务）。
-
-**3. 扫码配对**——打开 DSH Web 界面 → 设置面板 → 插件 → 微信桥 → 「扫码配对」，用微信扫码确认。
-
-> 微信 id 从哪来？配对完成后给机器人发任意一条消息，桥的调试日志（`$DSH_HOME/storages/dsh-wechat-bridge/debug.log`）里 `"from":"<你的微信id>"` 就是它。
+然后直接在微信里给机器人发消息即可。常用命令见下节。
 
 ## 微信命令
 
@@ -62,7 +50,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `allowFrom` | **必填，无默认** | 微信发送者硬白名单 |
+| `allowFrom` | 空 = 信任配对扫码者 | 可选：额外白名单（多用户或收紧） |
 | `defaultMode` | — | `/new` 不带模式时的默认预设 |
 | `cwd` | — | `/new` 会话默认工作目录 |
 | `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略 |

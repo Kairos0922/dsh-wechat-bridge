@@ -99,7 +99,7 @@ export const Config: z<NodeConfig> = z.object({
 
 /** Plugin identity + service deps (object form, resolved per plugin row). */
 export const name = 'wechat-bridge-node'
-export const inject = ['wechat', 'sessions', 'agents', 'approval', 'webServer', 'agentDefaultModel', 'agentPresets']
+export const inject = ['wechat', 'sessions', 'agents', 'approval', 'webServer', 'agentDefaultModel', 'agentPresets', 'credentials']
 
 function apply(ctx: Context, config: NodeConfig): void {
   const resolved: ResolvedNodeConfig = {

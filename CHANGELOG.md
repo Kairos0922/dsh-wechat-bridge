@@ -7,6 +7,9 @@
 
 ### 新增
 
+- **扫码配对即自动白名单**：配对确认时保存 `WEIXIN_ILINK_USER_ID`（扫码者的微信 id），
+  桥运行时动态放行该 id——新用户安装后只需「安装 + 扫码」两步，无需手写 `allowFrom`；
+  `allowFrom` 降级为可选的收紧/多用户配置（状态端点新增 `pairedUserId` 字段）。
 - **`/modes` 全量模式**：列出全部 agent 预设（含中文名称与说明，读 DSH `agentPresets` 服务），
   每项附可复制快捷命令 `/new <id>`，且**回复编号直接创建**（菜单 60 秒内有效）。
 - **`/model`**：桥内模型偏好。列表选择（供应商→模型）或显式 `/model <provider>/<model>`；

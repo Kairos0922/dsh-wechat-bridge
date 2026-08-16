@@ -125,7 +125,7 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
     peerKey = `group:${groupId}`
     target = groupId
   } else {
-    const allowed = node.isAllowed(senderId)
+    const allowed = await node.isAllowed(senderId)
     debugLog({ event: 'gate', from: senderId, allowed })
     if (!allowed) {
       node.ctx.logger.info(

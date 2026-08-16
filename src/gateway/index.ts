@@ -213,6 +213,9 @@ export class WechatGateway extends Service {
     if (creds.accountId) await this.ctx.credentials.set(credentialRef('WEIXIN_ACCOUNT_ID'), creds.accountId)
     if (creds.botToken) await this.ctx.credentials.set(credentialRef('WEIXIN_BOT_TOKEN'), creds.botToken)
     if (creds.baseUrl) await this.ctx.credentials.set(credentialRef('WEIXIN_BASE_URL'), creds.baseUrl)
+    // The pairer's own WeChat id: the QR scan IS the trust action, so this id
+    // is auto-allowlisted by the bridge node (allowFrom becomes optional).
+    if (creds.ilinkUserId) await this.ctx.credentials.set(credentialRef('WEIXIN_ILINK_USER_ID'), creds.ilinkUserId)
   }
 
   /** Shared QR pairing loop used by both the CLI login and the settings panel. */

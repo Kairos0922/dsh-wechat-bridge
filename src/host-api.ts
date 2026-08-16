@@ -53,6 +53,7 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
           paired: Boolean(creds?.botToken),
           accountId: creds?.accountId ?? null,
           allowFrom: node.resolved.allowFrom,
+          pairedUserId: await node.getPairedUserId(),
           defaultMode: node.resolved.defaultMode ?? null,
           markdownMode: node.resolved.markdownMode,
           modes: await listModes(ctx),
