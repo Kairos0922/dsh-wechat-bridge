@@ -53,7 +53,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `allowFrom` | 空 = 信任配对扫码者 | 可选：额外白名单（多用户或收紧） |
 | `defaultMode` | — | `/new` 不带模式时的默认预设 |
 | `cwd` | — | `/new` 会话默认工作目录 |
-| `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略 |
+| `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略（渲染实测矩阵见 [docs/markdown-matrix.md](docs/markdown-matrix.md)） |
 | `minSendIntervalMs` | 5000 | 出站最小发送间隔（限流卫生） |
 | `typingHeartbeatSec` | 25 | 长任务期间重发「正在输入」的间隔（0=关闭） |
 | `maxMessageChars` | 2000 | 单条气泡上限 |
