@@ -146,10 +146,10 @@ scripts/dry-run.sh --check  # 同上，自动退出（CI）
 
 ## 开源状态（2026-08-16 决策）
 
-- **渠道**：仅 GitHub 公开仓库（准备中，导出/推送由 Kairos 单独点头后执行）；**npm 暂缓**——
-  包名 `dsh-wechat-bridge` 已被他人在 npm 占用（2026-08-14），如未来发布 npm 需改名或协调。
+- **GitHub 已上线**：https://github.com/Kairos0922/dsh-wechat-bridge（public，CI 全绿）
+- **npm 暂缓**：包名 `dsh-wechat-bridge` 已被他人在 npm 占用（2026-08-14），如未来发布 npm 需改名或协调。
 - 代码与构建已 publish-ready（`pnpm verify` 全绿、`prepublishOnly` 已接）。
-- 版权署名暂保持现状；发布预检清单（版本定版 / CI / 最终审计）由维护者在发布前逐项执行。
+- 版权署名暂保持现状；发布预检清单（版本定版 / 最终审计）由维护者在发布前逐项执行。
 
 ## 文档
 
