@@ -109,11 +109,12 @@ test('session-expiry (-14) pauses the queue for the cooldown', async () => {
   )
 })
 
-test('generic failures do not pause the queue', async () => {
+test('generic failures retry (treated as transport-level) without pausing the queue', async () => {
   let now = 0
   const sleeps: number[] = []
+  const results: SendResult[] = [{ ok: false, errmsg: 'network down' }, { ok: true }, { ok: true }]
   const { outbox, sent } = makeOutbox({
-    results: [{ ok: false, errmsg: 'network down' }, { ok: true }],
+    results,
     now: () => now,
     sleep: async (ms) => {
       sleeps.push(ms)
@@ -123,7 +124,14 @@ test('generic failures do not pause the queue', async () => {
   outbox.enqueue(entry({ text: 'a' }))
   outbox.enqueue(entry({ text: 'b' }))
   await outbox.drain()
-  assert.equal(sent.length, 2)
+  // entry 'a' fails once → re-enqueued to the back → 'b' goes first, then
+  // the retried 'a' succeeds.
+  assert.equal(sent.length, 3)
+  assert.equal(sent[0]?.text, 'a')
+  assert.equal(sent[0]?.retryCount ?? 0, 0)
+  assert.equal(sent[1]?.text, 'b')
+  assert.equal(sent[2]?.text, 'a')
+  assert.equal(sent[2]?.retryCount, 1)
   assert.ok(sleeps.every((ms) => ms < 60 * 60_000), 'no long pause expected')
   assert.equal(outbox.getPausedUntil(), null)
 })
@@ -135,4 +143,63 @@ test('dispose drops remaining entries', async () => {
   outbox.dispose()
   await new Promise((r) => setTimeout(r, 60))
   assert.equal(sent.length, 0)
+})
+
+test('transport-level (retryable) failures re-enqueue and succeed on retry', async () => {
+  const sent: OutboxEntry[] = []
+  let attempts = 0
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    sleep: () => Promise.resolve(),
+    send: async (e) => {
+      sent.push(e)
+      attempts += 1
+      return attempts < 3 ? { ok: false, errmsg: 'fetch failed', retryable: true } : { ok: true, messageId: 42 }
+    },
+  })
+  outbox.enqueue(entry({ text: 'retry me' }))
+  await outbox.drain()
+  assert.equal(sent.length, 3, 'one initial attempt + two retries')
+  assert.equal(sent[0]?.retryCount ?? 0, 0)
+  assert.equal(sent[1]?.retryCount, 1)
+  assert.equal(sent[2]?.retryCount, 2)
+})
+
+test('server rejections (retryable === false) drop immediately', async () => {
+  const sent: OutboxEntry[] = []
+  const dropped: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    sleep: () => Promise.resolve(),
+    onDrop: (e) => dropped.push(e),
+    send: async (e) => {
+      sent.push(e)
+      return { ok: false, ret: -2, errmsg: 'prepare failed', retryable: false }
+    },
+  })
+  outbox.enqueue(entry({ text: 'no retry' }))
+  await outbox.drain()
+  assert.equal(sent.length, 1, 'no retries for server rejections')
+  assert.equal(dropped.length, 1)
+  assert.equal(dropped[0]?.text, 'no retry')
+})
+
+test('retry budget exhausted drops with reason failed', async () => {
+  const dropped: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    sleep: () => Promise.resolve(),
+    onDrop: (e) => dropped.push(e),
+    send: async () => ({ ok: false, errmsg: 'still down', retryable: true }),
+  })
+  outbox.enqueue(entry({ text: 'give up' }))
+  await outbox.drain()
+  assert.equal(dropped.length, 1)
+  assert.equal(dropped[0]?.retryCount, 2, 'retried twice then dropped')
 })

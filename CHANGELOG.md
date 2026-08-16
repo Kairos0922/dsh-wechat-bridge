@@ -7,6 +7,12 @@
 
 ### 新增
 
+- **通道健壮性（P1 审计，见 docs/robustness-audit.md）**：
+  - 出站失败分类重试：传输层失败自动重试（最多 3 次尝试，自然退避），
+    服务器显式拒绝不重试——消除"网络抖动丢回复"；
+  - context_token 持久化（state.json）：重启后主动推送/出站仍带会话上下文；
+  - get_updates_buf 持久化（poll-cursor.json，带所属 bot 身份）+ 会话过期
+    保留游标（对齐官方 monitor）——消除重放/漏消息边界；
 - **引用回复（ref_msg）**：用户引用某条消息时，被引用内容（标题+正文，含嵌套引用）
   以 `[引用: …]` 形式带进 agent 上下文——逐字段移植官方 bodyFromItemList；
   引用媒体消息时仅保留当前文本（对齐官方语义）。协议类型补 RefMessage 定义。

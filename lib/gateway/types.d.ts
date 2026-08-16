@@ -122,6 +122,12 @@ export interface SendResult {
     errcode?: number;
     errmsg?: string;
     messageId?: number;
+    /**
+     * Whether a retry may succeed. false = the SERVER explicitly rejected the
+     * message (ret != 0, e.g. prepare failed) — retrying is pointless. true or
+     * undefined = transport-level failure (timeout/network/HTTP) — retryable.
+     */
+    retryable?: boolean;
 }
 /** Mirror the official WeixinMessage field set (Tencent/openclaw-weixin). */
 export interface InboundMessage {

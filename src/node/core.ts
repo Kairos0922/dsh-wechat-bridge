@@ -168,6 +168,12 @@ export class WechatBridgeNode {
     for (const [sessionId, peerId] of this.state.listSessionOwners()) {
       this.sessionOwners.set(sessionId, peerId)
     }
+    // Restore context tokens: without them, sends after a restart carry no
+    // context_token and the WeChat client may not associate them to a
+    // conversation window (official client persists these per account).
+    for (const [peerId, token] of this.state.listContextTokens()) {
+      this.peerContextTokens.set(peerId, token)
+    }
     this.disposers.push(attachSessionOutbound(this))
     this.disposers.push(attachApprovalBridge(this))
     this.disposers.push(attachMediaRetention(this))
@@ -400,8 +406,13 @@ export class WechatBridgeNode {
 
   /** Remember the peer's latest context token (echoed on replies). */
   setPeerContextToken(peerId: string, token: string | null): void {
-    if (token) this.peerContextTokens.set(peerId, token)
-    else this.peerContextTokens.delete(peerId)
+    if (token) {
+      this.peerContextTokens.set(peerId, token)
+      this.state.setContextToken(peerId, token)
+    } else {
+      this.peerContextTokens.delete(peerId)
+      this.state.setContextToken(peerId, null)
+    }
   }
 
   /** Remember the peer's latest run id (progress-card association). */

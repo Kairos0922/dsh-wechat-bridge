@@ -32,7 +32,7 @@ test('sanitizeState drops malformed fields and never throws', () => {
   assert.deepEqual(data.prefs, {})
   assert.deepEqual(data.peerSessions, {})
   assert.deepEqual(data.sessionOwners, {})
-  assert.deepEqual(sanitizeState(null), { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {} })
+  assert.deepEqual(sanitizeState(null), { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} })
 })
 
 test('peer bindings and prefs persist across instances', async () => {
@@ -85,4 +85,18 @@ test('missing file starts fresh without error', () => {
   assert.equal(state.getPeerSession('nobody'), null)
   assert.deepEqual(state.prefs, {})
   state.dispose()
+})
+
+test('context tokens persist and restore across instances', () => {
+  const file = `/tmp/dwb-state-tokens-${Date.now()}.json`
+  const a = new BridgeState({ file, debounceMs: 5 })
+  a.setContextToken('peer-1', 'token-A')
+  a.dispose()
+  const b = new BridgeState({ file, debounceMs: 5 })
+  assert.equal(b.getContextToken('peer-1'), 'token-A')
+  b.setContextToken('peer-1', null)
+  b.dispose()
+  const c = new BridgeState({ file, debounceMs: 5 })
+  assert.equal(c.getContextToken('peer-1'), null)
+  c.dispose()
 })

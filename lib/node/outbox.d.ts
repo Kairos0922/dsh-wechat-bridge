@@ -35,6 +35,8 @@ export interface OutboxEntry {
     /** Progress coalescing: a newer entry replaces a queued older one. */
     coalesceKey?: string;
     createdAt: number;
+    /** Transport-level failures re-enqueue up to this many times. */
+    retryCount?: number;
 }
 export declare const OUTBOX_PRIORITY: {
     readonly system: 10;
@@ -42,6 +44,8 @@ export declare const OUTBOX_PRIORITY: {
     readonly tool: 25;
     readonly progress: 30;
 };
+/** Max attempts (1 send + this many retries) for transport-level failures. */
+export declare const OUTBOX_MAX_ATTEMPTS = 3;
 export interface OutboxOptions {
     minIntervalMs: number;
     backoffSecs: number[];
@@ -50,7 +54,7 @@ export interface OutboxOptions {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void;
-    onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed') => void;
+    onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed') => void;
 }
 export declare class Outbox {
     private readonly opts;
@@ -73,6 +77,10 @@ export declare class Outbox {
     drain(): Promise<void>;
     dispose(): void;
     private pump;
+    /**
+     * Classify a send result. Returns true when the entry was re-enqueued for
+     * retry; false when the entry is settled (delivered, paused, or dropped).
+     */
     private handleResult;
 }
 //# sourceMappingURL=outbox.d.ts.map

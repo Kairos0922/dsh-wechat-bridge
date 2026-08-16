@@ -40,9 +40,14 @@ export interface OutboxEntry {
   /** Progress coalescing: a newer entry replaces a queued older one. */
   coalesceKey?: string
   createdAt: number
+  /** Transport-level failures re-enqueue up to this many times. */
+  retryCount?: number
 }
 
 export const OUTBOX_PRIORITY = { system: 10, text: 20, tool: 25, progress: 30 } as const
+
+/** Max attempts (1 send + this many retries) for transport-level failures. */
+export const OUTBOX_MAX_ATTEMPTS = 3
 
 export interface OutboxOptions {
   minIntervalMs: number
@@ -52,7 +57,7 @@ export interface OutboxOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
-  onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed') => void
+  onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed') => void
 }
 
 export class Outbox {
@@ -174,25 +179,38 @@ export class Outbox {
         try {
           result = await this.opts.send(entry)
         } catch (err) {
-          result = { ok: false, errmsg: String(err).slice(0, 200) }
+          // A thrown send is transport-level by definition: retryable.
+          result = { ok: false, errmsg: String(err).slice(0, 200), retryable: true }
         }
-        this.handleResult(result)
+        const retried = this.handleResult(entry, result)
+        // Transport-level failures re-enqueue (up to OUTBOX_MAX_ATTEMPTS).
+        // Re-enqueue goes to the BACK of its priority class (fresh createdAt)
+        // and the min-interval spacing paces the retry — a natural backoff.
+        if (retried) {
+          const attempts = (entry.retryCount ?? 0) + 1
+          this.enqueue({ ...entry, retryCount: attempts, createdAt: this.opts.now() })
+          if (this.pumping) continue
+        }
       }
     } finally {
       this.pumping = false
     }
   }
 
-  private handleResult(result: SendResult): void {
+  /**
+   * Classify a send result. Returns true when the entry was re-enqueued for
+   * retry; false when the entry is settled (delivered, paused, or dropped).
+   */
+  private handleResult(entry: OutboxEntry, result: SendResult): boolean {
     if (result.ok) {
       this.backoffIdx = 0
-      return
+      return false
     }
     if (result.errcode === SESSION_EXPIRED_ERRCODE) {
       this.pausedUntil = this.opts.now() + this.opts.sessionExpiredPauseMs
       this.backoffIdx = 0
       this.onPause?.(this.pausedUntil, 'session-expired')
-      return
+      return false
     }
     if (result.errcode === RATE_LIMIT_ERRCODE) {
       const steps = this.opts.backoffSecs
@@ -200,11 +218,18 @@ export class Outbox {
       this.backoffIdx += 1
       this.pausedUntil = this.opts.now() + secs * 1000
       this.onPause?.(this.pausedUntil, 'rate-limit')
-      return
+      return false
     }
-    // Generic failure: no pause; the next pump iteration's min-interval spacing
-    // already prevents a hot retry loop. Backoff index resets so a single
-    // transient network blip does not escalate.
+    // Generic failure. Transport-level (retryable) failures re-enqueue within
+    // the attempt budget; explicit server rejections (retryable === false)
+    // and exhausted budgets drop the entry.
+    const attempts = (entry.retryCount ?? 0) + 1
+    if (result.retryable !== false && attempts < OUTBOX_MAX_ATTEMPTS) {
+      this.backoffIdx = 0
+      return true
+    }
     this.backoffIdx = 0
+    this.onDrop?.(entry, 'failed')
+    return false
   }
 }

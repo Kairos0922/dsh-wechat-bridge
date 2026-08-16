@@ -56,4 +56,35 @@ export declare class SeenStore {
     private flush;
     dispose(): void;
 }
+/** Default poll-cursor file location under the bridge's storage dir. */
+export declare function defaultPollCursorFile(): string;
+/**
+ * Persisted `get_updates_buf` continuation cursor, tagged with the accountId
+ * it belongs to (a re-paired bot must not reuse the old bot's cursor).
+ * Mirrors the official monitor's per-account sync-file semantics. Atomic
+ * writes on a debounce; all timers unref'd.
+ */
+export declare class PollCursorStore {
+    private readonly file;
+    private readonly debounceMs;
+    private cursor;
+    private timer;
+    private dirty;
+    private disposed;
+    constructor(opts?: {
+        file?: string;
+        debounceMs?: number;
+    });
+    load(): {
+        accountId: string;
+        buf: string;
+    } | null;
+    save(cursor: {
+        accountId: string;
+        buf: string;
+    } | null): void;
+    private schedule;
+    private flush;
+    dispose(): void;
+}
 //# sourceMappingURL=seen.d.ts.map

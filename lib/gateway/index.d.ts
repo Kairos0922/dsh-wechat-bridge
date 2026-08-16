@@ -92,8 +92,10 @@ export declare class WechatGateway extends Service {
     private c;
     private stopPolling;
     private pollAbort;
-    /** Durable inbound dedup — survives restart (the poll cursor does not). */
+    /** Durable inbound dedup — survives restart. */
     private seen;
+    /** Durable get_updates_buf cursor, tagged with its bot identity. */
+    private pollCursorStore;
     /** Last send failure facts for the status panel and outbox pause display. */
     lastSendError: {
         errcode?: number;

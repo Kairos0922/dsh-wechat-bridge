@@ -163,3 +163,89 @@ export class SeenStore {
     this.disposed = true
   }
 }
+
+/** Default poll-cursor file location under the bridge's storage dir. */
+export function defaultPollCursorFile(): string {
+  return path.join(resolveDshHome(), 'storages', 'dsh-wechat-bridge', 'poll-cursor.json')
+}
+
+/**
+ * Persisted `get_updates_buf` continuation cursor, tagged with the accountId
+ * it belongs to (a re-paired bot must not reuse the old bot's cursor).
+ * Mirrors the official monitor's per-account sync-file semantics. Atomic
+ * writes on a debounce; all timers unref'd.
+ */
+export class PollCursorStore {
+  private readonly file: string
+  private readonly debounceMs: number
+  private cursor: { accountId: string; buf: string } | null = null
+  private timer: NodeJS.Timeout | null = null
+  private dirty = false
+  private disposed = false
+
+  constructor(opts: { file?: string; debounceMs?: number } = {}) {
+    this.file = opts.file ?? defaultPollCursorFile()
+    this.debounceMs = opts.debounceMs ?? 5_000
+    try {
+      const raw = fs.readFileSync(this.file, 'utf-8')
+      const parsed = JSON.parse(raw) as unknown
+      if (typeof parsed === 'object' && parsed !== null) {
+        const p = parsed as Record<string, unknown>
+        if (typeof p.accountId === 'string' && typeof p.buf === 'string' && p.accountId && p.buf) {
+          this.cursor = { accountId: p.accountId, buf: p.buf }
+        }
+      }
+    } catch {
+      // absent or unreadable = no cursor; never fatal
+    }
+  }
+
+  load(): { accountId: string; buf: string } | null {
+    return this.cursor
+  }
+
+  save(cursor: { accountId: string; buf: string } | null): void {
+    const next = cursor === null ? null : { accountId: cursor.accountId, buf: cursor.buf }
+    const cur = this.cursor
+    if (
+      (cur === null) !== (next === null) ||
+      (cur !== null && next !== null && (cur.accountId !== next.accountId || cur.buf !== next.buf))
+    ) {
+      this.cursor = next
+      this.dirty = true
+      this.schedule()
+    }
+  }
+
+  private schedule(): void {
+    if (this.disposed) return
+    if (this.timer !== null) return
+    this.timer = setTimeout(() => {
+      this.timer = null
+      this.flush()
+    }, this.debounceMs)
+    this.timer.unref?.()
+  }
+
+  private flush(): void {
+    if (!this.dirty || this.disposed) return
+    this.dirty = false
+    const tmp = `${this.file}.tmp`
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true })
+      fs.writeFileSync(tmp, JSON.stringify(this.cursor), 'utf-8')
+      fs.renameSync(tmp, this.file)
+    } catch {
+      // best-effort persistence
+    }
+  }
+
+  dispose(): void {
+    if (this.timer !== null) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.flush()
+    this.disposed = true
+  }
+}

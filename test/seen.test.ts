@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { SeenSet, SeenStore } from '../src/seen.ts'
+import { PollCursorStore, SeenSet, SeenStore } from '../src/seen.ts'
 
 test('SeenSet dedups within TTL and expires after', () => {
   let now = 0
@@ -71,4 +71,18 @@ test('SeenStore ignores non-array entries on restore', () => {
   assert.ok(store.has(3))
   store.dispose()
   fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('PollCursorStore persists and validates account identity', () => {
+  const file = `/tmp/dwb-cursor-${Date.now()}.json`
+  const a = new PollCursorStore({ file, debounceMs: 5 })
+  a.save({ accountId: 'bot-A', buf: 'cursor-1' })
+  a.dispose()
+  const b = new PollCursorStore({ file, debounceMs: 5 })
+  assert.deepEqual(b.load(), { accountId: 'bot-A', buf: 'cursor-1' })
+  b.save(null)
+  b.dispose()
+  const c = new PollCursorStore({ file, debounceMs: 5 })
+  assert.equal(c.load(), null)
+  c.dispose()
 })

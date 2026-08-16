@@ -60,7 +60,7 @@ import {
   UPLOAD_MAX_BYTES,
 } from './upload.ts'
 import { debugLog, debugLogMediaCapture } from '../debug-log.ts'
-import { SeenStore } from '../seen.ts'
+import { PollCursorStore, SeenStore } from '../seen.ts'
 
 export interface GatewayConfig {
   baseUrl?: string
@@ -127,8 +127,10 @@ export class WechatGateway extends Service {
   private c: ResolvedGatewayConfig
   private stopPolling = false
   private pollAbort: AbortController | null = null
-  /** Durable inbound dedup — survives restart (the poll cursor does not). */
+  /** Durable inbound dedup — survives restart. */
   private seen = new SeenStore()
+  /** Durable get_updates_buf cursor, tagged with its bot identity. */
+  private pollCursorStore = new PollCursorStore()
   /** Last send failure facts for the status panel and outbox pause display. */
   lastSendError: { errcode?: number; errmsg?: string; at: number } | null = null
 
@@ -156,6 +158,7 @@ export class WechatGateway extends Service {
         this.stopPolling = true
         this.pollAbort?.abort()
         this.seen.dispose()
+        this.pollCursorStore.dispose()
         // Best-effort farewell so the server flips the channel state promptly.
         void this.resolveCredentials().then((creds) => {
           if (creds?.botToken) {
@@ -356,7 +359,11 @@ export class WechatGateway extends Service {
     try {
       let baseUrl = creds.baseUrl || this.c.baseUrl
       let token = creds.botToken
-      let buf = ''
+      let accountId = creds.accountId ?? ''
+      // Restore the continuation cursor ONLY when it belongs to this bot
+      // identity — a re-paired bot must not reuse the old identity's cursor.
+      const savedCursor = this.pollCursorStore.load()
+      let buf = savedCursor !== null && savedCursor.accountId === accountId ? savedCursor.buf : ''
       let failures = 0
       while (!this.stopPolling) {
         if (failures >= 3) {
@@ -378,6 +385,9 @@ export class WechatGateway extends Service {
           if (errcode === SESSION_EXPIRED_ERRCODE || (errcode === -2 && /unknown error/i.test(batch.errmsg ?? ''))) {
             // -14 / -2+unknown: session expiry — re-resolve credentials so a
             // fresh pairing (panel/CLI) takes effect without another restart.
+            // The continuation cursor is KEPT (official monitor semantics): a
+            // stale-token pause is not a reason to replay or skip messages.
+            // Only an actual identity change (re-pair) resets the cursor.
             this.status = 'paused'
             this.pairingMessage = '会话过期，若重新扫码配对将自动恢复'
             debugLog({ event: 'poll-session-expired', errcode, errmsg: batch.errmsg })
@@ -385,9 +395,14 @@ export class WechatGateway extends Service {
             await new Promise((r) => setTimeout(r, 10 * 60_000))
             const fresh = await this.resolveCredentials()
             if (fresh?.botToken) {
+              const identityChanged = fresh.botToken !== token
               baseUrl = fresh.baseUrl || this.c.baseUrl
               token = fresh.botToken
-              buf = ''
+              accountId = fresh.accountId ?? accountId
+              if (identityChanged) {
+                buf = ''
+                this.pollCursorStore.save(null)
+              }
             }
             continue
           }
@@ -402,7 +417,11 @@ export class WechatGateway extends Service {
             await new Promise((r) => setTimeout(r, 5_000))
             continue
           }
-          buf = batch.get_updates_buf ?? buf
+          const nextBuf = batch.get_updates_buf
+          if (nextBuf && nextBuf !== buf) {
+            buf = nextBuf
+            this.pollCursorStore.save({ accountId, buf })
+          }
           this.handleBatch(batch.msgs ?? [])
           this.status = 'polling'
         } catch (err) {
@@ -530,11 +549,16 @@ export class WechatGateway extends Service {
       })
       return result
     } catch (err) {
+      // Failure classification: an IlinkSendError means the SERVER answered
+      // with ret != 0 — retrying the same payload cannot succeed. Anything
+      // else (fetch timeout/network/HTTP) is transport-level and retryable.
+      const serverRejected = err instanceof IlinkSendError
       const record = {
         ok: false,
-        ret: err instanceof IlinkSendError ? err.ret : undefined,
-        errcode: err instanceof IlinkSendError ? err.errcode : undefined,
+        ret: serverRejected ? err.ret : undefined,
+        errcode: serverRejected ? err.errcode : undefined,
         errmsg: err instanceof Error ? err.message : String(err),
+        retryable: !serverRejected,
       }
       this.lastSendError = { errcode: record.errcode, errmsg: record.errmsg.slice(0, 200), at: Date.now() }
       debugLog({ event: 'send', to: params.toUserId, ...record })
@@ -578,7 +602,7 @@ export class WechatGateway extends Service {
     try {
       const plaintext = fs.readFileSync(params.filePath)
       if (plaintext.length > UPLOAD_MAX_BYTES) {
-        return { ok: false, errmsg: `file too large (${plaintext.length} bytes > ${UPLOAD_MAX_BYTES})` }
+        return { ok: false, errmsg: `file too large (${plaintext.length} bytes > ${UPLOAD_MAX_BYTES})`, retryable: false }
       }
       const rawsize = plaintext.length
       const filesize = aesEcbPaddedSize(rawsize)
@@ -596,7 +620,7 @@ export class WechatGateway extends Service {
         aeskey: aeskey.toString('hex'),
       })
       if (slot.ret && slot.ret !== 0) {
-        const result: SendResult = { ok: false, ret: slot.ret, errcode: slot.errcode, errmsg: slot.errmsg }
+        const result: SendResult = { ok: false, ret: slot.ret, errcode: slot.errcode, errmsg: slot.errmsg, retryable: false }
         this.lastSendError = { errcode: slot.errcode, errmsg: (slot.errmsg ?? '').slice(0, 200), at: Date.now() }
         debugLog({ event: 'send-media', to: params.toUserId, ok: false, ret: slot.ret, errcode: slot.errcode })
         return result
@@ -611,7 +635,7 @@ export class WechatGateway extends Service {
       })
       const uploadParam = slot.upload_param?.trim()
       if (!uploadParam) {
-        return { ok: false, errmsg: 'getUploadUrl returned no upload_param' }
+        return { ok: false, errmsg: 'getUploadUrl returned no upload_param', retryable: false }
       }
       // full_url must be ABSOLUTE (official-client mirror). Config default is
       // WEIXIN_CDN_BASE_URL; the fallback guards deployments that pinned an
@@ -633,7 +657,7 @@ export class WechatGateway extends Service {
         item,
       })
     } catch (err) {
-      const record: SendResult = { ok: false, errmsg: err instanceof Error ? err.message : String(err) }
+      const record: SendResult = { ok: false, errmsg: err instanceof Error ? err.message : String(err), retryable: true }
       this.lastSendError = { errmsg: record.errmsg!.slice(0, 200), at: Date.now() }
       debugLog({ event: 'send-media', to: params.toUserId, ok: false, error: record.errmsg!.slice(0, 200) })
       return record

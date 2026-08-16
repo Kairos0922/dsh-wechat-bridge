@@ -34,6 +34,12 @@ export interface BridgeStateData {
   peerSessions: Record<string, string>
   /** sessionId → owning peer id (survives restart for reply routing). */
   sessionOwners: Record<string, string>
+  /**
+   * peerId → latest iLink context token. The official client persists these
+   * per account; without them, sends after a restart carry no context_token
+   * and the WeChat client may not associate them to a conversation window.
+   */
+  contextTokens: Record<string, string>
 }
 
 export function defaultStateFile(): string {
@@ -47,7 +53,7 @@ export interface BridgeStateOptions {
 
 /** Validate an unknown JSON value into a usable state (never throws). */
 export function sanitizeState(value: unknown): BridgeStateData {
-  const base: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {} }
+  const base: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
   if (typeof value !== 'object' || value === null) return base
   const record = value as Record<string, unknown>
   const prefsRaw = record.prefs
@@ -73,7 +79,14 @@ export function sanitizeState(value: unknown): BridgeStateData {
       if (typeof session === 'string' && typeof peer === 'string' && session && peer) sessionOwners[session] = peer
     }
   }
-  return { version: 1, prefs, peerSessions, sessionOwners }
+  const contextTokens: Record<string, string> = {}
+  const rawTokens = record.contextTokens
+  if (typeof rawTokens === 'object' && rawTokens !== null) {
+    for (const [peer, token] of Object.entries(rawTokens as Record<string, unknown>)) {
+      if (typeof peer === 'string' && typeof token === 'string' && peer && token) contextTokens[peer] = token
+    }
+  }
+  return { version: 1, prefs, peerSessions, sessionOwners, contextTokens }
 }
 
 export class BridgeState {
@@ -82,6 +95,8 @@ export class BridgeState {
   private readonly debounceMs: number
   private peerSessions = new Map<string, string>()
   private sessionOwners = new Map<string, string>()
+  private contextTokens = new Map<string, string>()
+
   private timer: NodeJS.Timeout | null = null
   private dirty = false
   private disposed = false
@@ -89,7 +104,7 @@ export class BridgeState {
   constructor(opts: BridgeStateOptions = {}) {
     this.file = opts.file ?? defaultStateFile()
     this.debounceMs = opts.debounceMs ?? 3_000
-    let loaded: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {} }
+    let loaded: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
     try {
       loaded = sanitizeState(JSON.parse(fs.readFileSync(this.file, 'utf-8')) as unknown)
     } catch {
@@ -98,6 +113,7 @@ export class BridgeState {
     this.prefs = loaded.prefs
     this.peerSessions = new Map(Object.entries(loaded.peerSessions))
     this.sessionOwners = new Map(Object.entries(loaded.sessionOwners))
+    this.contextTokens = new Map(Object.entries(loaded.contextTokens))
   }
 
   getPeerSession(peerId: string): string | null {
@@ -138,6 +154,27 @@ export class BridgeState {
     return [...this.sessionOwners.entries()]
   }
 
+  getContextToken(peerId: string): string | null {
+    return this.contextTokens.get(peerId) ?? null
+  }
+
+  setContextToken(peerId: string, token: string | null): void {
+    if (token === null) {
+      if (this.contextTokens.delete(peerId)) this.schedule()
+      return
+    }
+    if (this.contextTokens.get(peerId) !== token) {
+      this.contextTokens.set(peerId, token)
+      this.schedule()
+    }
+  }
+
+  listContextTokens(): Array<[string, string]> {
+    return [...this.contextTokens.entries()]
+  }
+
+
+
   /**
    * Update prefs. An empty string DELETES the key ('' must mean "follow the
    * default" — a stored '' would shadow the config-level fallback chain).
@@ -172,6 +209,7 @@ export class BridgeState {
       prefs: { ...this.prefs },
       peerSessions: Object.fromEntries(this.peerSessions),
       sessionOwners: Object.fromEntries(this.sessionOwners),
+      contextTokens: Object.fromEntries(this.contextTokens),
     }
   }
 

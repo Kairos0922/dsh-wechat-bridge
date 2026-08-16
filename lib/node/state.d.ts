@@ -28,6 +28,12 @@ export interface BridgeStateData {
     peerSessions: Record<string, string>;
     /** sessionId → owning peer id (survives restart for reply routing). */
     sessionOwners: Record<string, string>;
+    /**
+     * peerId → latest iLink context token. The official client persists these
+     * per account; without them, sends after a restart carry no context_token
+     * and the WeChat client may not associate them to a conversation window.
+     */
+    contextTokens: Record<string, string>;
 }
 export declare function defaultStateFile(): string;
 export interface BridgeStateOptions {
@@ -42,6 +48,7 @@ export declare class BridgeState {
     private readonly debounceMs;
     private peerSessions;
     private sessionOwners;
+    private contextTokens;
     private timer;
     private dirty;
     private disposed;
@@ -52,6 +59,9 @@ export declare class BridgeState {
     getSessionOwner(sessionId: string): string | null;
     setSessionOwner(sessionId: string, peerId: string | null): void;
     listSessionOwners(): Array<[string, string]>;
+    getContextToken(peerId: string): string | null;
+    setContextToken(peerId: string, token: string | null): void;
+    listContextTokens(): Array<[string, string]>;
     /**
      * Update prefs. An empty string DELETES the key ('' must mean "follow the
      * default" — a stored '' would shadow the config-level fallback chain).
