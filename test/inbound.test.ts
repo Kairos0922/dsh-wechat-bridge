@@ -120,3 +120,57 @@ test('routeCommand answers unknown commands with help', async () => {
   assert.equal(sent.length, 1)
   assert.ok(sent[0]!.includes('未知命令'))
 })
+
+test('extractText: quoted text message renders [引用: title | body] + own text', () => {
+  const message = {
+    item_list: [
+      {
+        type: 1,
+        text_item: { text: '继续展开讲讲' },
+        ref_msg: {
+          title: '上次的结论',
+          message_item: { type: 1, text_item: { text: '先看数据再下结论' } },
+        },
+      },
+    ],
+  } as never
+  assert.equal(extractText(message), '[引用: 上次的结论 | 先看数据再下结论]\n继续展开讲讲')
+})
+
+test('extractText: quoted media message keeps only the current text', () => {
+  const message = {
+    item_list: [
+      {
+        type: 1,
+        text_item: { text: '这张图帮我看看' },
+        ref_msg: { message_item: { type: 2, image_item: {} } },
+      },
+    ],
+  } as never
+  assert.equal(extractText(message), '这张图帮我看看')
+})
+
+test('extractText: nested quoted chain flattens into one context line', () => {
+  const message = {
+    item_list: [
+      {
+        type: 1,
+        text_item: { text: '再补充' },
+        ref_msg: {
+          message_item: {
+            type: 1,
+            text_item: { text: '中间层' },
+            ref_msg: { message_item: { type: 1, text_item: { text: '最底层' } } },
+          },
+        },
+      },
+    ],
+  } as never
+  // 官方语义：递归渲染，嵌套引用保留各自标记
+  assert.equal(extractText(message), '[引用: [引用: 最底层]\n中间层]\n再补充')
+})
+
+test('extractText: plain text without ref is unchanged', () => {
+  const message = { item_list: [{ type: 1, text_item: { text: '你好' } }] } as never
+  assert.equal(extractText(message), '你好')
+})

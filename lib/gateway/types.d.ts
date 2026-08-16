@@ -90,13 +90,19 @@ export interface ToolCallResultItem {
     tool_call_id?: string;
     status?: string;
 }
+/** Quoted-message reference (official RefMessage, field-for-field). */
+export interface RefMessage {
+    message_item?: MessageItem;
+    /** Summary/title of the quoted message. */
+    title?: string;
+}
 export interface MessageItem {
     type?: number;
     create_time_ms?: number;
     update_time_ms?: number;
     is_completed?: boolean;
     msg_id?: string;
-    ref_msg?: unknown;
+    ref_msg?: RefMessage;
     text_item?: TextItem;
     image_item?: ImageItem;
     voice_item?: VoiceItem;

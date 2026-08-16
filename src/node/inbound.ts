@@ -18,12 +18,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {
+  ITEM_FILE,
   ITEM_IMAGE,
   ITEM_TEXT,
+  ITEM_VIDEO,
   ITEM_VOICE,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
+  type MessageItem,
 } from '../gateway/types.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { sendTextToPeer } from './outbound.ts'
@@ -35,25 +38,47 @@ export function defaultMediaDir(): string {
   return path.join(resolveDshHome(), 'storages', 'dsh-wechat-bridge', 'media')
 }
 
-/** Extract the visible text of an inbound message (text + voice transcription). */
-export function extractText(message: InboundMessage): string {
-  const items = Array.isArray(message.item_list) ? message.item_list : []
-  for (const item of items) {
+/**
+ * Port of official `bodyFromItemList` (Tencent/openclaw-weixin inbound.ts,
+ * field-for-field): renders the visible text of one message item list,
+ * including quoted-message context (`ref_msg`). Quoted media is NOT rendered
+ * as text — only the current message's own text is kept (the official path
+ * hands quoted media elsewhere).
+ */
+export function isMediaItem(item: MessageItem | undefined): boolean {
+  return !!item && (item.type === ITEM_IMAGE || item.type === ITEM_VIDEO || item.type === ITEM_FILE || item.type === ITEM_VOICE)
+}
+
+export function bodyFromItemList(itemList?: MessageItem[]): string {
+  if (!Array.isArray(itemList) || itemList.length === 0) return ''
+  for (const item of itemList) {
     if (item?.type === ITEM_TEXT) {
       const text = String(item.text_item?.text ?? '')
-      if (text.trim()) return text
-    }
-  }
-  for (const item of items) {
-    if (item?.type === ITEM_VOICE) {
-      const voiceText = String((item as { voice_item?: { text?: string } }).voice_item?.text ?? '')
-      if (voiceText.trim()) {
-        // WeChat supplied its own transcription; keep the origin visible.
-        return `[语音转写]\n${voiceText}`
+      const ref = item.ref_msg
+      if (!ref) return text
+      // 引用的消息是媒体（图片/视频/文件/语音）时，只保留当前文本。
+      if (isMediaItem(ref.message_item)) return text
+      const parts: string[] = []
+      if (ref.title) parts.push(ref.title)
+      if (ref.message_item) {
+        const refBody = bodyFromItemList([ref.message_item])
+        if (refBody) parts.push(refBody)
       }
+      if (parts.length === 0) return text
+      return `[引用: ${parts.join(' | ')}]\n${text}`
+    }
+    // 语音转写：语音消息带 text 字段时直接使用。
+    if (item?.type === ITEM_VOICE) {
+      const voiceText = String(item.voice_item?.text ?? '')
+      if (voiceText.trim()) return `[语音转写]\n${voiceText}`
     }
   }
   return ''
+}
+
+/** Extract the visible text of an inbound message (text + quoted context + voice transcription). */
+export function extractText(message: InboundMessage): string {
+  return bodyFromItemList(message.item_list)
 }
 
 /**
