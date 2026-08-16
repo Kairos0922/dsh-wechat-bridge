@@ -2,7 +2,7 @@
  * iLink protocol types shared by the gateway and the bridge node.
  *
  * Field names follow the official openclaw-weixin backend protocol
- * (Tencent/openclaw-weixin, MIT) — see README.zh.md for the protocol table.
+ * (Tencent/openclaw-weixin, MIT) — see README.md for the protocol table.
  *
  * @module dsh-wechat-bridge/gateway/types
  */

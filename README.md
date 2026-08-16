@@ -1,157 +1,99 @@
 # dsh-wechat-bridge
 
-**Control your DSH agents from WeChat** — the iLink gateway plus a conversation
-bridge for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness),
-with features the ecosystem lacks:
+**把微信变成 DeepSeek Harness（DSH）的移动遥控器。**
 
-1. **Dynamic mode routing** — every agent preset is discovered at runtime via
-   the DSH `agentPresets` service, listed with `/modes` (Chinese name +
-   description + copyable `/new <id>` + tap-a-number shortcut), selected per
-   session with `/new <mode>`. No hardcoded roles.
-2. **Mobile-first conversation UX** — Markdown rendering policy for the WeChat
-   client, thinking digests, native tool-progress cards, todo snapshots,
-   numbered choice menus — all through one rate-limit-aware outbound queue.
-3. **Image-in-session** — inbound WeChat images are downloaded (CDN decrypt),
-   stored in the local workspace, and handed to the agent session.
-4. **Web settings panel** — QR pairing, allowlist, mode list, bridge prefs
-   (model/workspace), queue/rate-limit status — no CLI QR juggling.
+人在外面，智能体在电脑上干活——微信发一条消息，DSH 替你查资料、写代码、跑脚本、处理文件，结果直接回微信。走腾讯官方 iLink 通道，扫码即连，无需公网服务器、无需 webhook、无需固定 IP。
 
-## Architecture
+## 特性
 
-```
-You (WeChat) ⇄ iLink gateway ⇄ wechat-gateway (ctx.wechat) ⇄ wechat-bridge-node ⇄ DSH session
-```
+- **多模式动态路由**：`/modes` 列出你 DSH 里的全部 agent 预设（财务助理、事业军师、生活管家……），回复编号直接开会话，不写死任何角色
+- **移动端完整体验**：Markdown 保真渲染、思考进度心跳、任务清单快照、编号菜单、长文自动分段
+- **安全边界**：`allowFrom` 硬白名单（白名单外消息直接丢弃，绝不喂给模型）；危险操作经审批，微信里 `/yes` `/no` 或回复编号即决
+- **微信 ⇄ 图片**：微信发来的图片经 CDN 下载、AES 解密后落本机工作区，交给 agent 处理（入站图片生产可用）
+- **工程化底座**：限流感知出站队列（自动退避）、typing 缓存、断线重连、持久化去重、崩溃可恢复
+- **Web 设置面板**：扫码配对、白名单、模式一览、桥内偏好（模型/工作区）、出站队列状态——不用碰终端
 
-Two separable Cordis plugins:
+## 快速开始
 
-| Plugin | Role |
-|---|---|
-| `wechat-gateway` | iLink service: QR login, authenticated long-poll, reconnect/backoff, structured send results, typing-ticket cache, durable inbound dedup, CDN media |
-| `wechat-bridge-node` | WeChat ⇄ DSH bridge: allowlist gate, per-peer session binding, commands, approvals, rate-limit-aware outbox, progress/answer outbound |
+前置：本机已安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh` CLI 可用）。
 
-## Install
+**一步安装**（自动注册为 profile 插件层）：
 
 ```sh
-cd plugins/dsh-wechat-bridge
-pnpm install && pnpm build
-dsh plugin --profile <your-profile> add .
+dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 ```
 
-Credentials are stored through the **dsh credentials service** — never in the
-patch file. Pair your WeChat account once:
+> 若你的 profile 不叫 `web`，把 `--profile web` 换成你的 profile 名。
 
-```sh
-pnpm login          # prints a QR URL; scan it with WeChat and confirm
-```
+装完还有三件必做（一次性）：
 
-## Configuration
+**1. 配白名单**——编辑 `~/.dsh/profiles/web/cordis.patch.yml`（你的 profile 对应路径），加：
 
 ```yaml
-# profile patch (cordis.patch.yml)
-plugins:
-  dsh-wechat-bridge:
-    allowFrom: ["<your-wechat-id>"]   # hard allowlist, REQUIRED, no default
-    defaultMode: life-butler          # default agent preset for `/new`
-    cwd: /path/to/workspace           # default working dir for `/new` sessions
-    approvalTimeoutSec: 600           # approval timeout (default deny)
-    maxMessageChars: 2000             # max chars per WeChat bubble
-    minSendIntervalMs: 5000           # min spacing between outbound sends
-    rateLimitBackoffSecs: [10, 30, 60]  # escalating pause after errcode -12
-    sessionExpiredPauseMin: 60        # outbound pause after errcode -14
-    thinkingDigestSec: 10             # thinking-digest refresh while a turn runs
-    menuTimeoutSec: 60                # numbered choice menus expire after this
-    markdownMode: passthrough         # passthrough | filter | plain
-    progressToolPrefixes: []          # tool-progress card prefixes ([] = off, backend not ready)
-    fileThresholdChars: 1500          # longer answers ship as a .md attachment
-    notifyOnComplete: false           # proactive completion push (long turns only)
-    notifyMinTurnSec: 300             # min turn duration (sec) for completion push
-    mediaRetentionDays: 30            # media/export file retention (days)
-    allowGroups: []                   # group allowlist: [{roomId, allowFrom:[...]}]
-    cardMode: off                     # long-image cards: off | long
-    chromePath: ''                    # Chrome binary for card rendering (auto-detect)
+- id: dsh-wechat-bridge
+  config:
+    allowFrom: ["<你的微信id>"]   # 必填！白名单外任何人发消息都会被忽略
+    defaultMode: standard         # 可选：/new 不带模式时的默认预设
+    cwd: /path/to/workspace       # 可选：会话默认工作目录
 ```
 
-`allowFrom` is **mandatory with no permissive default**: messages from
-non-allowlisted senders are logged and ignored — never fed to the model.
+**2. 重启** `dsh web`（或按你的部署习惯重启服务）。
 
-> Breaking config change vs 0.1.x: `digestIntervalSec` and `sendChunkDelayMs`
-> were removed — pacing is now `minSendIntervalMs` (queue) and progress
-> visibility is `thinkingDigestSec`. See [CHANGELOG.md](CHANGELOG.md).
+**3. 扫码配对**——打开 DSH Web 界面 → 设置面板 → 插件 → 微信桥 → 「扫码配对」，用微信扫码确认。
 
-## Commands (in WeChat)
+> 微信 id 从哪来？配对完成后给机器人发任意一条消息，桥的调试日志（`$DSH_HOME/storages/dsh-wechat-bridge/debug.log`）里 `"from":"<你的微信id>"` 就是它。
 
-`/modes` · `/new [mode] <prompt>` · `/sessions` · `/use N` · `/stop` · `/status` ·
-`/model` · `/workspace` · `/retry` · `/close` · `/thinking` · `/export` · `/card` ·
-`/yes` · `/no` · `/help [cmd]`
+## 微信命令
 
-- `/modes` lists **every** mode with a Chinese name/description and a copyable
-  `/new <id>`; replying with a bare number creates the session directly
-  (menu valid for `menuTimeoutSec`).
-- `/model` / `/workspace` are bridge-local prefs persisted under
-  `$DSH_HOME/storages/dsh-wechat-bridge/state.json`; they apply to `/new`
-  sessions and never mutate the deployment defaults.
-- `//`-prefixed text is forwarded to the agent verbatim (escape hatch for
-  text that happens to start with `/`).
-- Answers longer than `fileThresholdChars` ship as a digest text + `.md`
-  attachment; `/export` sends the full transcript; `/thinking on` shows
-  reasoning excerpts in the digest. Sessions created from WeChat carry a
-  durable `origin: 'wechat'` header — DSH renders a 🟢 badge in the sidebar
-  (harness patch, see docs/harness-patch.md).
-- Group chats: `allowGroups` room-level two-tier allowlist; groups stay quiet
-  (no digests/cards), only command results and final answers.
+| 命令 | 作用 |
+|---|---|
+| `/modes` | 列出全部 agent 预设，回复编号直接开会话 |
+| `/new <模式> <任务>` | 按模式开新会话并投递任务 |
+| `/sessions` `/use N` | 查看 / 切换本会话 |
+| `/status` | 会话、模型、工作区、出站状态 |
+| `/model` `/workspace` | 桥内偏好（仅影响之后新建的会话） |
+| `/retry` `/stop` `/close` | 重试 / 停止 / 归档会话 |
+| `/thinking on|off` | 思考心跳是否附最近原文 |
+| `/yes` `/no` | 审批（也支持回复编号） |
+| `/help [命令]` | 帮助 |
+| `//开头` | 转义：原样把 `/` 开头的文本当普通消息发给 agent |
 
-## Markdown policy
+## 常用配置
 
-The WeChat client **renders Markdown for iLink bot messages** (headings h1–h4,
-bold, lists, tables, code fences, inline code, rules, blockquotes — verified
-end-to-end). Policies:
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `allowFrom` | **必填，无默认** | 微信发送者硬白名单 |
+| `defaultMode` | — | `/new` 不带模式时的默认预设 |
+| `cwd` | — | `/new` 会话默认工作目录 |
+| `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略 |
+| `minSendIntervalMs` | 5000 | 出站最小发送间隔（限流卫生） |
+| `maxMessageChars` | 2000 | 单条气泡上限 |
+| `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件） |
 
-- `passthrough` (default): send model Markdown as-is; only `![alt](url)` becomes
-  a tappable URL.
-- `filter`: the official channel's streaming filter (field-for-field port —
-  see [docs/porting-notes.md](docs/porting-notes.md)) — strips CJK italic,
-  h5/h6 and inline images; the conservative cross-client choice.
-- `plain`: strip every marker for clients that render nothing.
+完整配置见插件源码 `src/node/index.ts` 的 Config 与 [docs/porting-notes.md](docs/porting-notes.md)。
 
-## Progress & rate limits
+## 已知限制（实测结论）
 
-The WeChat channel rate-limits; there are no published numbers, so the outbox
-adapts instead of assuming:
+- **bot → 微信 发图片/附件暂不可用**：微信客户端只渲染其客户端自生成的媒体参数结构，服务器签发的结构会被静默丢弃；官方参考实现（openclaw / hermes）当前同样不通。判定证据与金丝雀重测条件见 [docs/porting-notes.md §6.1](docs/porting-notes.md)。**入站图片（微信 → bot）完全可用。**
+- **群聊**：iLink 机器人身份暂无法被拉入普通微信群（腾讯侧限制），`allowGroups` 已就绪待开放。
+- **工具进度卡片**：当前微信后端对卡片 item 静默丢弃，默认关闭（`progressToolPrefixes: []`），后端支持后填前缀即可启用。
+- **限流**：微信通道无限流公开数字，出站队列自适应退避，请勿高频连发。
 
-- one serial queue, priority-ordered (approvals > terminal notices > answers >
-  progress), progress entries coalesce (newer digest replaces a queued one);
-- minimum inter-send spacing (`minSendIntervalMs`);
-- `-12` (rate limit) → escalating backoff; `-14` (session expired) → full pause
-  (official session-guard semantics);
-- thinking digests every `thinkingDigestSec` only while there is new progress;
-- tool progress aggregates into the digest (anti-spam). Native
-  `TOOL_CALL_START/RESULT` cards are **off by default**
-  (`progressToolPrefixes: []`): send-only probes verified the current backend
-  silently drops those items (no ack, no delivery). The protocol surface is
-  fully aligned with the official client — set the prefixes (e.g.
-  `[bash, fs, web]`) once the channel supports the cards.
+## 开发
 
-> Known behavior: driving a WeChat session from the DSH Web UI also streams
-> its progress and replies to WeChat (one session, one stream, visible on both
-> ends). This is a feature; a "mute WeChat while Web drives" switch can be
-> added on request.
+```sh
+pnpm install && pnpm verify   # build → bundle → node --check → 84 项测试
+scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
+```
 
-## Safety notes
+## 文档
 
-- iLink allows ONE authenticated poller per bot token; running another bridge
-  on the same WeChat account causes 403s.
-- This rides Tencent's WeChat bot gateway; Tencent could restrict the account.
-- WeChat messages only enter the DSH session stream — never a shell.
-- `allowFrom` is the security boundary: never widen it casually.
-
-## Docs
-
+- [docs/porting-notes.md](docs/porting-notes.md) — 相对 Tencent/openclaw-weixin 的逐字段移植对照表（协议对齐 diff 清单）
+- [docs/harness-patch.md](docs/harness-patch.md) — DSH harness 补丁记录（origin 徽标，升级 DSH 后需重打）
 - [CHANGELOG.md](CHANGELOG.md)
-- [docs/porting-notes.md](docs/porting-notes.md) — field-by-field porting table
-  vs Tencent/openclaw-weixin (upgrade diff checklist)
 
-## License
+## 许可
 
-MIT — see [LICENSE](LICENSE) for the full attribution (protocol client and
-markdown filter derived from Tencent/openclaw-weixin; architecture informed by
-dsh-chatnode-wechat).
+MIT。协议客户端与 Markdown 过滤器移植自 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)（MIT）；架构范式参照 [Jesse-njx/dsh-chatnode-wechat](https://github.com/Jesse-njx/dsh-chatnode-wechat)（MIT）。完整署名见 [LICENSE](LICENSE)。
+
+> ⚠️ 本通道经腾讯微信机器人网关，腾讯可能限制账号；建议使用愿意承担风险的微信号。仅使用官方 iLink 通道，不涉及任何非官方协议。
