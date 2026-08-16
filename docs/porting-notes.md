@@ -86,3 +86,34 @@
 > 工程决策：协议保持官方形状（xep + base64 原始字节 key + encrypt_type 1），
 > `fileThresholdChars` 默认 **0=关闭**，`/export` `/card` 保留为后端支持后立即可用。
 > 后端升级后按本矩阵重测即可开关。
+
+### §6.1 活体验证追加（2026-08-16 晚间，生产代码路径 `scripts/probe-media.mjs`）
+
+用**生产同款 lib 产物** + 真实账号凭证，对用户微信实发探针，结论与早间矩阵一致
+并新增关键证据（全部有日志记录）：
+
+| 探针 | 变体 | 服务器 | 端上（手机核对） |
+|---|---|---|---|
+| A | 生产形状：upload_param(896字符) + aes_key=base64(hex,44字符) + full_url(绝对) + mid_size | ack (message_id) | **静默丢弃**（未收到） |
+| B | 官方形状：xep(488字符) + aes_key=base64(原始字节,24字符) | ack | **静默丢弃** |
+| C | A + context_token（官方文档 3.5 声称必填） | ack | **静默丢弃** → context_token 不是投递条件 |
+| D | C + create_time_ms/update_time_ms/is_completed + 去掉 mid_size（完整镜像官方 item） | **prepare failed (ret=-2)** | — |
+| E | C + item 字段但保留 mid_size | **prepare failed** | — |
+| F | C + 仅 create_time_ms/update_time_ms | **prepare failed** | — |
+| G | C + 仅 is_completed | **prepare failed** | — |
+
+- **item 级字段二分**：官方客户端入站 item 带 create_time_ms/update_time_ms/is_completed，
+  但 **bot 发送带任一字段即 prepare failed**——服务器对 bot 出站媒体 item 有独立校验，
+  bot 形状必须**不带**这三个字段（我们原始形状正确，勿照抄客户端入站 item 全字段）。
+- **官方客户端 item 没有 mid_size**（入站抓取验证），但保留 mid_size 不影响 ack。
+- **结构解码**：官方客户端 encrypt_query_param = base64( base64url( 404 字节二进制 ) )，
+  服务器签发 upload_param = base64( base64url( 504 字节二进制 ) )——两者结构不同，
+  客户端渲染器只认客户端生成结构；服务器侧两种结构均可下载（自下载闭环均 200+解密一致），
+  说明门禁在**客户端渲染/取流侧**，不在 CDN。
+- **入站方向实测通过**：用户手机发照片 → bot 经 full_url 下载 + AES 解密落盘成功
+  （`media/<session>/wechat-*.jpg` 为真实 JPEG）——M3 链路生产端到端可用。
+
+**判定边界（终局）**：bot→微信 外发图片当前被客户端渲染门禁锁定（客户端只渲染其自生成
+404B 签名结构；服务器签发结构与任何 item 字段组合均无法送达可看图）。bot 侧无解；
+重测工具 = `node scripts/probe-media.mjs --shape current --ctx <token> --to <userId>`，
+当某次探针在端上出现气泡且可打开时即门禁解除。

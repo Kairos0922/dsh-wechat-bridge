@@ -42,6 +42,7 @@ import {
   SESSION_EXPIRED_ERRCODE,
   UPLOAD_MEDIA_FILE,
   UPLOAD_MEDIA_IMAGE,
+  WEIXIN_CDN_BASE_URL,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
@@ -50,7 +51,14 @@ import {
   type WechatCredentials,
 } from './types.ts'
 import { downloadImage as downloadImageMedia } from './media.ts'
-import { aesEcbPaddedSize, encodeMediaAesKey, md5Hex, randomHex, uploadBufferToCdn, UPLOAD_MAX_BYTES } from './upload.ts'
+import {
+  aesEcbPaddedSize,
+  buildOutboundMediaItem,
+  md5Hex,
+  randomHex,
+  uploadBufferToCdn,
+  UPLOAD_MAX_BYTES,
+} from './upload.ts'
 import { debugLog } from '../debug-log.ts'
 import { SeenStore } from '../seen.ts'
 
@@ -63,7 +71,7 @@ export interface GatewayConfig {
 
 export const Config = z.object({
   baseUrl: z.string().default(ILINK_BASE_URL),
-  cdnBaseUrl: z.string().default(''),
+  cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
   token: z.string().default(''),
   accountId: z.string().default(''),
 })
@@ -584,31 +592,22 @@ export class WechatGateway extends Service {
         cdnBaseUrl: this.c.cdnBaseUrl,
         aeskey,
       })
-      // Outbound-media protocol shape — EXACT mirror of the official client's
-      // own outbound items (captured from real inbound media messages):
-      // - encrypt_query_param = the LONG getUploadUrl upload_param structure
-      //   (NOT the CDN x-encrypted-param header — that one delivers a bubble
-      //   but its content fetch is rejected with 400 on download);
-      // - aes_key = base64 of the key's HEX STRING (44 chars) — the official
-      //   client's encoding (its inbound media.aes_key decodes to the hex);
-      // - full_url = the complete download URL with the same param — the
-      //   official client carries it verbatim;
-      // - NO encrypt_type (the official outbound shape carries none; sending
-      //   one alongside these fields trips prepare validation).
       const uploadParam = slot.upload_param?.trim()
       if (!uploadParam) {
         return { ok: false, errmsg: 'getUploadUrl returned no upload_param' }
       }
-      const fullUrl = `${this.c.cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(uploadParam)}`
-      const media = {
-        encrypt_query_param: uploadParam,
-        aes_key: encodeMediaAesKey(aeskey),
-        full_url: fullUrl,
-      }
-      const item: MessageItem =
-        params.mediaType === UPLOAD_MEDIA_IMAGE
-          ? { type: ITEM_IMAGE, image_item: { aeskey: aeskey.toString('hex'), media, mid_size: filesize } }
-          : { type: ITEM_FILE, file_item: { media, file_name: params.fileName, len: String(rawsize) } }
+      // full_url must be ABSOLUTE (official-client mirror). Config default is
+      // WEIXIN_CDN_BASE_URL; the fallback guards deployments that pinned an
+      // empty cdnBaseUrl before the default existed (see porting-notes §6).
+      const cdnBase = this.c.cdnBaseUrl || WEIXIN_CDN_BASE_URL
+      const item = buildOutboundMediaItem({
+        mediaType: params.mediaType,
+        uploadParam,
+        aeskey,
+        cdnBaseUrl: cdnBase,
+        rawsize,
+        fileName: params.fileName,
+      })
       return this.sendItem({
         toUserId: params.toUserId,
         contextToken: params.contextToken,

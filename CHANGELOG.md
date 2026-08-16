@@ -59,6 +59,14 @@
 
 ### 修复
 
+- **外发媒体 `full_url` 相对路径缺陷**：`cdnBaseUrl` 配置默认值为空时，媒体 item 的
+  `full_url` 被拼成 `/download?...` 相对路径；现 Config 默认 `WEIXIN_CDN_BASE_URL`，
+  且 `uploadAndSendMedia` 有兜底（`cdnBaseUrl || WEIXIN_CDN_BASE_URL`）。媒体 item 组装
+  抽为纯函数 `buildOutboundMediaItem`（`src/gateway/upload.ts`），单测锁定官方形状
+  （44 字符 key、无 encrypt_type、绝对 full_url、image.aeskey/mid_size、file.len）。
+- **媒体外发探针工具**：`scripts/probe-media.mjs` —— 生产 lib 产物端到端探针
+  （getUploadUrl → AES-ECB → CDN 上传 → sendMessage），形状变体
+  current/official + item 字段二分 + context_token + 服务器自下载闭环；§6.1 重测工具。
 - **`run_id` 协议缺口**：官方 `buildTextMessageReq` 的 `run_id` 字段此前漏移植——现已全链路补上
   （网关 `InboundEvent.runId` → per-peer 保存 → 出站 `sendMessage` 携带），工具进度卡片与 run 的关联对齐官方。
 - 独立代码审查（子代理全量 diff）发现并修复：思考心跳空状态刷屏（H1）；模型菜单跨 peer 串线（M1）；

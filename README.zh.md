@@ -55,7 +55,7 @@ plugins:
     menuTimeoutSec: 60                # 编号菜单有效期（秒）
     markdownMode: passthrough         # passthrough | filter | plain
     progressToolPrefixes: []          # 进度卡片工具前缀（默认 [] = 关闭，后端暂不支持）
-    fileThresholdChars: 1500          # 回复超过该字数 → 摘要 + .md 附件
+    fileThresholdChars: 0             # 回复超过该字数 → 摘要 + .md 附件（默认 0=关闭；bot 外发媒体被客户端渲染门禁锁定，见 porting-notes §6.1）
     notifyOnComplete: false           # 任务完成主动推送（仅 ≥ notifyMinTurnSec 的任务）
     notifyMinTurnSec: 300             # 完成推送的最小任务时长（秒）
     mediaRetentionDays: 30            # 媒体/导出文件留存天数
@@ -128,6 +128,13 @@ scripts/dry-run.sh --check  # 同上，自动退出（CI）
 - [x] M4 移动端体验：/modes 全量中文 + /model /workspace /retry /close、🟢 徽标、per-peer 绑定、Markdown 策略、思考心跳、工具进度卡片、限流感知出站队列、持久化幂等
 - [x] P1：FILE 附件通道（CDN 上传移植+探针验证）、/thinking 开关、完成主动推送（默认关，端上可见性待实测）、媒体留存清理
 - [x] P2：`origin='wechat'` 结构化徽标（harness 补丁，见 docs/harness-patch.md）、群聊（room 两级白名单+静默，待群内实测）、长图骨架（/card，默认 off）
+
+> **发图片（bot→微信）现状（2026-08-16 活体判定）**：服务器 ack、CDN 内容自取一致，
+> 但微信客户端对 bot 外发媒体 item **静默丢弃**（3 个形状变体手机核对均未收到；
+> item 级字段镜像则被服务器 prepare failed）。根因：客户端只渲染其自生成的 404 字节
+> 签名结构，服务器签发结构（504 字节）不识别——bot 侧无解，参考实现同病。
+> 重测工具与判定边界见 [docs/porting-notes.md](docs/porting-notes.md) §6.1。
+> **入站图片（用户→bot）生产端到端可用**：照片下载 + AES 解密落盘实测通过。
 
 > 本插件为 **web profile 专用**（client 面板 + webServer 端点）；headless 可加载网关但无设置面板。
 

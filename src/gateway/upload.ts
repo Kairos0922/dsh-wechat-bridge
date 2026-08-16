@@ -11,6 +11,12 @@
  */
 
 import crypto from 'node:crypto'
+import {
+  ITEM_FILE,
+  ITEM_IMAGE,
+  UPLOAD_MEDIA_IMAGE,
+  type MessageItem,
+} from './types.ts'
 
 /** Encrypt buffer with AES-128-ECB (PKCS7 padding is the default). */
 export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
@@ -116,4 +122,45 @@ export function md5Hex(buf: Buffer): string {
 
 export function randomHex(bytes: number): string {
   return crypto.randomBytes(bytes).toString('hex')
+}
+
+/**
+ * Assemble the outbound media `MessageItem` — the EXACT shape the production
+ * pipeline sends (kept here as one pure function so tests and the standalone
+ * probe (scripts/probe-media.mjs) exercise the same assembly code the gateway
+ * runs). Field-for-field mirror of the official client's outbound shape
+ * (captured from real inbound media messages):
+ *
+ * - `encrypt_query_param` = the LONG getUploadUrl `upload_param` structure
+ *   (NOT the CDN `x-encrypted-param` header — that one delivers a bubble but
+ *   its content fetch is rejected with 400 on download);
+ * - `aes_key` = base64 of the key's HEX STRING (44 chars);
+ * - `full_url` = complete download URL with the same param (absolute — a
+ *   relative URL here is a defect, see porting-notes §6);
+ * - NO `encrypt_type` (the official outbound shape carries none);
+ * - image additionally carries `image_item.aeskey` (hex) + `mid_size`
+ *   (ciphertext size); file carries `file_name` + `len` (raw size).
+ *
+ * Any single-field deviation trips prepare validation or silent drops
+ * (see docs/porting-notes.md §6 matrix).
+ */
+export function buildOutboundMediaItem(params: {
+  mediaType: number
+  /** The `upload_param` returned by getUploadUrl (required, non-empty). */
+  uploadParam: string
+  aeskey: Buffer
+  /** Absolute CDN base URL (e.g. WEIXIN_CDN_BASE_URL) — never empty. */
+  cdnBaseUrl: string
+  rawsize: number
+  fileName: string
+}): MessageItem {
+  const fullUrl = `${params.cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(params.uploadParam)}`
+  const media = {
+    encrypt_query_param: params.uploadParam,
+    aes_key: encodeMediaAesKey(params.aeskey),
+    full_url: fullUrl,
+  }
+  return params.mediaType === UPLOAD_MEDIA_IMAGE
+    ? { type: ITEM_IMAGE, image_item: { aeskey: params.aeskey.toString('hex'), media, mid_size: aesEcbPaddedSize(params.rawsize) } }
+    : { type: ITEM_FILE, file_item: { media, file_name: params.fileName, len: String(params.rawsize) } }
 }
