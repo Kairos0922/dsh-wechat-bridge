@@ -59,7 +59,7 @@ import {
   uploadBufferToCdn,
   UPLOAD_MAX_BYTES,
 } from './upload.ts'
-import { debugLog } from '../debug-log.ts'
+import { debugLog, debugLogMediaCapture } from '../debug-log.ts'
 import { SeenStore } from '../seen.ts'
 
 export interface GatewayConfig {
@@ -448,13 +448,20 @@ export class WechatGateway extends Service {
         runId: msg.run_id ?? null,
         itemTypes: (msg.item_list ?? []).map((i) => i.type),
         text: (text ?? '').slice(0, 120) || null,
-        // Media-structure capture: the official client's OWN outbound media
-        // shape for this backend (ground truth for the outbound media gate —
-        // see docs/porting-notes.md §6). Logged verbatim for analysis.
+        // Media-structure digest (short): the official client's OWN outbound
+        // media shape — full-fidelity copies go to media-captures.jsonl.
         mediaItems: (msg.item_list ?? [])
           .filter((item) => item.type === ITEM_IMAGE || item.type === ITEM_FILE || item.type === ITEM_VIDEO)
           .map((item) => JSON.stringify(item).slice(0, 1200)),
       })
+      // Full-fidelity media capture: complete inbound media items (verbatim,
+      // no truncation) for byte-level shape comparison — the ground truth for
+      // the outbound media gate (docs/porting-notes.md §6.1).
+      for (const item of msg.item_list ?? []) {
+        if (item.type === ITEM_IMAGE || item.type === ITEM_FILE || item.type === ITEM_VIDEO) {
+          debugLogMediaCapture({ msgId: id ?? null, item })
+        }
+      }
       this.ctx.emit('wechat/message', payload)
       if (text) {
         this.ctx.logger.info('[dsh-wechat-bridge] inbound from %s: %s', senderId, text.slice(0, 120))

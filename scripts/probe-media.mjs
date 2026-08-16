@@ -1,5 +1,15 @@
 #!/usr/bin/env node
 /**
+ * ⚠️⚠️⚠️  生产通道探针 —— 使用前必须阅读  ⚠️⚠️⚠️
+ *
+ * 本脚本会对**生产微信账号**发送真实消息。教训（2026-08-16）：
+ * 无许可的连续探针导致旧 bot 身份发送路径被服务器封禁（prepare failed，
+ * 重新扫码配对才恢复）。规矩：
+ *   1. 仅能在用户明确同意的测试窗口内运行；
+ *   2. 任何非 dry 发送必须带 --consent；
+ *   3. 每个窗口最多 1-2 条发送，异常立即停止；
+ *   4. 实验前先只读确认通道健康（/api/dsh-wechat-bridge/status = polling）。
+ *
  * probe-media.mjs — bot→WeChat 外发媒体（图片/文件）的端到端探针。
  *
  * 用生产同款 BUILT 产物（lib/）跑真实链路：getUploadUrl → AES-128-ECB → CDN 上传
@@ -28,11 +38,14 @@ import { getUploadUrl, sendMessage } from '../lib/gateway/ilink-client.js'
 import {
   aesEcbPaddedSize,
   buildOutboundMediaItem,
+  encodeMediaAesKey,
+  encryptAesEcb,
   md5Hex,
   randomHex,
   uploadBufferToCdn,
 } from '../lib/gateway/upload.js'
 import { decryptAesEcb } from '../lib/gateway/media.js'
+import { pathToFileURL } from 'node:url'
 import {
   ITEM_IMAGE,
   UPLOAD_MEDIA_IMAGE,
@@ -116,9 +129,12 @@ function parseArgs(argv) {
     else if (a === '--ctx') args.contextToken = argv[++i]
     else if (a === '--no-mid-size') args.noMidSize = true
     else if (a === '--encrypt-type') { const v = argv[++i]; args.encryptType = v === 'null' ? null : Number(v) }
+    else if (a === '--hermes-flow') args.hermesFlow = true
+    else if (a === '--envelope-matrix') args.envelopeMatrix = true
+    else if (a === '--consent') args.consent = true
   }
-  if (!['current', 'official', 'official-exact'].includes(args.shape)) {
-    throw new Error(`unknown --shape '${args.shape}' (current|official|official-exact)`)
+  if (!['current', 'official', 'official-exact', 'mirror'].includes(args.shape)) {
+    throw new Error(`unknown --shape '${args.shape}' (current|official|official-exact|mirror)`)
   }
   return args
 }
@@ -143,19 +159,28 @@ function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, 
       full_url: `${cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(xep)}`,
     }
     item = { type: ITEM_IMAGE, image_item: { aeskey: aeskey.toString('hex'), media, mid_size: filesize } }
-  } else {
-    // official-exact: Tencent/openclaw-weixin sendImageMessageWeixin 逐字段镜像
-    // (src/messaging/send.ts + src/cdn/upload.ts, v2.4.5):
+  } else if (shape === 'official-exact') {
+    // Tencent/openclaw-weixin sendImageMessageWeixin 逐字段镜像（v2.4.5）:
     //   media = { encrypt_query_param: <CDN 上传响应 x-encrypted-param>,
-    //             aes_key: base64(原始16字节, 24字符), encrypt_type: 1 }
-    //   image_item = { media, mid_size: 密文尺寸 }
-    // 无 full_url、无 image_item.aeskey、无 item 级字段
+    //             aes_key: base64(HEX 字符串, 44字符), encrypt_type: 1 }
+    //   image_item = { media, mid_size: 密文尺寸 }；无 full_url、无 image_item.aeskey
     const media = {
       encrypt_query_param: xep,
-      aes_key: aeskey.toString('base64'),
+      aes_key: encodeMediaAesKey(aeskey),
       ...(encryptType !== null ? { encrypt_type: encryptType } : {}),
     }
     item = { type: ITEM_IMAGE, image_item: { media, mid_size: filesize } }
+  } else {
+    // mirror: 官方客户端入站抓取逐字段镜像（唯一差异 = 参数来源用服务器 upload_param）:
+    //   image_item = { aeskey(hex), media: { encrypt_query_param, aes_key: 44字符, full_url } }
+    //   无 mid_size、无 encrypt_type（与官方客户端出站 item 完全一致）
+    const media = {
+      encrypt_query_param: uploadParam,
+      aes_key: encodeMediaAesKey(aeskey),
+      full_url: `${cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(uploadParam)}`,
+      ...(encryptType !== null ? { encrypt_type: encryptType } : {}),
+    }
+    item = { type: ITEM_IMAGE, image_item: { aeskey: aeskey.toString('hex'), media } }
   }
   const f = itemFields ? ['ct', 'ut', 'ic'] : (fields || [])
   if (f.includes('ct')) item.create_time_ms = Date.now()
@@ -170,6 +195,19 @@ function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, 
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
+  if (!args.dry && !args.consent) {
+    console.error('✖ 拒绝执行：非 dry 模式必须带 --consent（用户明确同意测试窗口）。')
+    console.error('  只读/不发送请加 --dry。')
+    process.exit(2)
+  }
+  if (args.envelopeMatrix) {
+    await runEnvelopeMatrix({ to: args.to, ctx: args.contextToken })
+    return
+  }
+  if (args.hermesFlow) {
+    await runHermesFlow(args)
+    return
+  }
   const creds = loadCredentials()
   const to = args.to
   if (!to) throw new Error('--to <userId> required (e.g. the allowlisted WeChat id)')
@@ -258,7 +296,194 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('✖ 探针异常:', err)
-  process.exit(1)
-})
+
+// ---------------------------------------------------------------------------
+// hermes-flow: 逐字段复刻 hermes-agent 0.19.0 gateway/platforms/weixin.py 的
+// 完整外发流程（含信封/头/顺序），验证 prepare failed 是否由信封差异导致。
+// 关键差异点：iLink-App-ClientVersion=2.2.0、base_info 仅 channel_version、
+// caption 文本先行（独立消息）、媒体 item 用 CDN 上传响应 xep。
+// ---------------------------------------------------------------------------
+
+const HERMES_CLIENT_VERSION = (2 << 16) | (2 << 8) | 0 // 2.2.0
+
+function hermesHeaders(token, body, clientVersion) {
+  return {
+    'Content-Type': 'application/json',
+    AuthorizationType: 'ilink_bot_token',
+    'Content-Length': String(Buffer.byteLength(body)),
+    'X-WECHAT-UIN': Buffer.from(String(crypto.randomBytes(4).readUInt32BE(0)), 'utf-8').toString('base64'),
+    'iLink-App-Id': 'bot',
+    'iLink-App-ClientVersion': String(clientVersion ?? HERMES_CLIENT_VERSION),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
+
+async function hermesApiPost({ baseUrl, endpoint, payload, token, clientVersion, botAgent }) {
+  const baseInfo = { channel_version: '2.2.0', ...(botAgent ? { bot_agent: botAgent } : {}) }
+  const body = JSON.stringify({ ...payload, base_info: baseInfo })
+  const res = await fetch(`${baseUrl.replace(/\/$/, '')}/${endpoint}`, {
+    method: 'POST',
+    headers: hermesHeaders(token, body, clientVersion),
+    body,
+  })
+  const raw = await res.text()
+  if (!res.ok) throw new Error(`hermes POST ${endpoint} HTTP ${res.status}: ${raw.slice(0, 200)}`)
+  return JSON.parse(raw)
+}
+
+/** 信封对照矩阵：纯文本 + getUploadUrl，验证服务器今天对信封字段的校验。 */
+export async function runEnvelopeMatrix({ to, ctx }) {
+  const creds = loadCredentials()
+  const variants = [
+    { label: 'hermes原封不动(2.2.0, 无bot_agent)', clientVersion: (2 << 16) | (2 << 8) | 0, botAgent: undefined },
+    { label: 'hermes信封+bot_agent', clientVersion: (2 << 16) | (2 << 8) | 0, botAgent: 'dsh-wechat-bridge/0.1.0' },
+    { label: '版本1.0.0+bot_agent', clientVersion: (1 << 16) | (0 << 8) | 0, botAgent: 'dsh-wechat-bridge/0.1.0' },
+    { label: '版本0.1.0+bot_agent(我们现状)', clientVersion: (0 << 16) | (1 << 8) | 0, botAgent: 'dsh-wechat-bridge/0.1.0' },
+  ]
+  for (const v of variants) {
+    const textResp = await hermesApiPost({
+      baseUrl: creds.baseUrl,
+      endpoint: 'ilink/bot/sendmessage',
+      payload: {
+        msg: {
+          from_user_id: '',
+          to_user_id: to,
+          client_id: crypto.randomUUID(),
+          message_type: 2,
+          message_state: 2,
+          item_list: [{ type: 1, text_item: { text: '信封矩阵探针' } }],
+          ...(ctx ? { context_token: ctx } : {}),
+        },
+      },
+      token: creds.token,
+      ...v,
+    })
+    const upResp = await hermesApiPost({
+      baseUrl: creds.baseUrl,
+      endpoint: 'ilink/bot/getuploadurl',
+      payload: {
+        filekey: randomHex(16),
+        media_type: 1,
+        to_user_id: to,
+        rawsize: 5,
+        rawfilemd5: md5Hex(Buffer.from('probe')),
+        filesize: 16,
+        no_need_thumb: true,
+        aeskey: Buffer.from(randomHex(16), 'hex').toString('hex'),
+      },
+      token: creds.token,
+      ...v,
+    })
+    console.log(`信封[${v.label}]: text=${JSON.stringify(textResp)} getUploadUrl=${JSON.stringify({ ret: upResp.ret, uploadParamLen: (upResp.upload_param ?? '').length })}`)
+  }
+}
+
+async function sendHermesFlow({ creds, to, ctx, image, fileName, dry }) {
+  // 1) caption 文本先行（hermes _send_file 语义：独立消息）
+  if (!dry) {
+    const captionResp = await hermesApiPost({
+      baseUrl: creds.baseUrl,
+      endpoint: 'ilink/bot/sendmessage',
+      payload: {
+        msg: {
+          from_user_id: '',
+          to_user_id: to,
+          client_id: crypto.randomUUID(),
+          message_type: 2,
+          message_state: 2,
+          item_list: [{ type: 1, text_item: { text: `📎 ${fileName} (hermes-flow 探针)` } }],
+          ...(ctx ? { context_token: ctx } : {}),
+        },
+      },
+      token: creds.token,
+    })
+    console.log('H1 caption →', JSON.stringify(captionResp))
+  }
+  // 2) getUploadUrl（hermes 同字段）
+  const filekey = randomHex(16)
+  const aeskey = Buffer.from(randomHex(16), 'hex')
+  const rawsize = image.length
+  const filesize = aesEcbPaddedSize(rawsize)
+  const slot = await hermesApiPost({
+    baseUrl: creds.baseUrl,
+    endpoint: 'ilink/bot/getuploadurl',
+    payload: {
+      filekey,
+      media_type: 1,
+      to_user_id: to,
+      rawsize,
+      rawfilemd5: md5Hex(image),
+      filesize,
+      no_need_thumb: true,
+      aeskey: aeskey.toString('hex'),
+    },
+    token: creds.token,
+  })
+  console.log('H2 getUploadUrl →', JSON.stringify({ ret: slot.ret, uploadParamLen: (slot.upload_param ?? '').length }))
+  if (slot.ret && slot.ret !== 0) throw new Error(`getUploadUrl ret=${slot.ret}`)
+  // 3) CDN 上传（hermes _cdn_upload_url + POST）
+  const uploadUrl = slot.upload_full_url?.trim() || `${creds.cdnBaseUrl.replace(/\/$/, '')}/upload?encrypted_query_param=${encodeURIComponent(slot.upload_param)}&filekey=${encodeURIComponent(filekey)}`
+  const ciphertext = encryptAesEcb(image, aeskey)
+  const upRes = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(ciphertext),
+  })
+  const xep = upRes.headers.get('x-encrypted-param')
+  console.log('H3 CDN 上传 →', upRes.status, 'xep 长度 =', xep?.length ?? 0)
+  if (!xep) throw new Error('CDN upload missing x-encrypted-param')
+  // 4) 媒体 item（hermes _outbound_media_builder 逐字段）
+  const mediaItem = {
+    type: 2,
+    image_item: {
+      media: {
+        encrypt_query_param: xep,
+        aes_key: Buffer.from(aeskey.toString('hex'), 'ascii').toString('base64'), // base64(hex字符串) 44字符
+        encrypt_type: 1,
+      },
+      mid_size: ciphertext.length,
+    },
+  }
+  console.log('H4 item →', JSON.stringify({ type: mediaItem.type, media: mediaItem.image_item.media, mid_size: mediaItem.image_item.mid_size }))
+  if (dry) {
+    console.log('⏸ --dry：不发送。')
+    return
+  }
+  const resp = await hermesApiPost({
+    baseUrl: creds.baseUrl,
+    endpoint: 'ilink/bot/sendmessage',
+    payload: {
+      msg: {
+        from_user_id: '',
+        to_user_id: to,
+        client_id: crypto.randomUUID(),
+        message_type: 2,
+        message_state: 2,
+        item_list: [mediaItem],
+        ...(ctx ? { context_token: ctx } : {}),
+      },
+    },
+    token: creds.token,
+  })
+  console.log('H5 sendMessage →', JSON.stringify(resp))
+  if (resp.ret && resp.ret !== 0) throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? ''}`)
+  console.log('✅ hermes-flow ack。端上可见性 = 手机核对。')
+}
+
+export async function runHermesFlow(args) {
+  const creds = loadCredentials()
+  const to = args.to
+  if (!to) throw new Error('--to <userId> required')
+  const image = args.image ? fs.readFileSync(args.image) : makeTestPng()
+  const fileName = args.image ? path.basename(args.image) : 'probe.png'
+  await sendHermesFlow({ creds, to, ctx: args.contextToken, image, fileName, dry: args.dry })
+}
+
+// 直接执行时跑 main；被 import 时仅暴露 runHermesFlow（供 hermes-flow 模式调用）
+const isDirect = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isDirect) {
+  main().catch((err) => {
+    console.error('✖ 探针异常:', err)
+    process.exit(1)
+  })
+}

@@ -14,10 +14,18 @@ import os from 'node:os'
 import path from 'node:path'
 
 const MAX_BYTES = 512 * 1024
+/** Full-fidelity media capture cap — items can be a few KB each (2MB tail). */
+const MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 
 function debugFilePath(): string {
   const home = process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh')
   return path.join(home, 'storages', 'dsh-wechat-bridge', 'debug.log')
+}
+
+/** Dedicated sink for FULL inbound media items (outbound-shape ground truth). */
+function mediaCaptureFilePath(): string {
+  const home = process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh')
+  return path.join(home, 'storages', 'dsh-wechat-bridge', 'media-captures.jsonl')
 }
 
 export function debugLog(event: Record<string, unknown>): void {
@@ -29,6 +37,27 @@ export function debugLog(event: Record<string, unknown>): void {
     if (fs.statSync(file).size > MAX_BYTES) {
       // Keep the tail: the most recent records matter most for diagnosis.
       fs.writeFileSync(file, fs.readFileSync(file).subarray(-Math.floor(MAX_BYTES / 2)))
+    }
+  } catch {
+    // diagnostics are best-effort only
+  }
+}
+
+/**
+ * Capture a FULL inbound media item verbatim (no truncation). The debug log
+ * only keeps a 1200-char digest; this sink preserves the complete official
+ * client outbound shape — including the full encrypt_query_param, thumb_media
+ * and any field the digest would hide — for byte-level comparison against our
+ * own sends (docs/porting-notes.md §6). Append-only JSONL, capped tail.
+ */
+export function debugLogMediaCapture(event: { msgId?: number | string | null; item: unknown }): void {
+  try {
+    const file = mediaCaptureFilePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const line = JSON.stringify({ ts: new Date().toISOString(), msgId: event.msgId ?? null, item: event.item }) + '\n'
+    fs.appendFileSync(file, line)
+    if (fs.statSync(file).size > MAX_CAPTURE_BYTES) {
+      fs.writeFileSync(file, fs.readFileSync(file).subarray(-Math.floor(MAX_CAPTURE_BYTES / 2)))
     }
   } catch {
     // diagnostics are best-effort only
