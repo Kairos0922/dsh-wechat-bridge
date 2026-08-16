@@ -14,7 +14,7 @@ scripts/dry-run.sh --check    # 期望：状态端点健康、7 个模式、白�
 ## 1. 重启
 
 ```sh
-# 由 Kairos 选定时间窗执行（会话会断）
+# 由维护者选定时间窗执行（会话会断）
 dsh --profile web   # 重启 dsh web（或按部署习惯重启服务）
 ```
 
