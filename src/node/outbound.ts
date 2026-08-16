@@ -202,6 +202,8 @@ export function isProgressTool(node: WechatBridgeNode, name: string): boolean {
 interface DigestState {
   startedTurns: Set<number>
   heartbeat?: ReturnType<typeof setInterval>
+  /** Keeps the "typing…" indicator alive during long turns. */
+  typingTimer?: ReturnType<typeof setInterval>
   reasoningChars: number
   lastReasoning: string
   toolCount: number
@@ -228,6 +230,10 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       clearInterval(state.heartbeat)
       state.heartbeat = undefined
     }
+    if (state.typingTimer) {
+      clearInterval(state.typingTimer)
+      state.typingTimer = undefined
+    }
   }
 
   const sendTyping = (peer: string, status: 1 | 2) => {
@@ -240,6 +246,15 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
 
   const startHeartbeat = (session: Session, peer: string, state: DigestState) => {
     stopHeartbeat(state)
+    // Typing heartbeat: the client may stop showing "typing…" during long
+    // turns — re-assert it periodically (rate-budget friendly: the ticket is
+    // cached, the call itself is lightweight). 0 = disabled.
+    if (node.resolved.typingHeartbeatSec > 0) {
+      state.typingTimer = setInterval(() => {
+        sendTyping(peer, 1)
+      }, node.resolved.typingHeartbeatSec * 1000)
+      state.typingTimer.unref?.()
+    }
     if (node.resolved.thinkingDigestSec <= 0) return
     state.lastTickKey = ''
     state.heartbeat = setInterval(() => {

@@ -117,7 +117,7 @@ export const COMMANDS: CommandSpec[] = [
     id: 'new',
     summary: '按模式新建会话并开始',
     usage: '/new [模式] <prompt>',
-    detail: '新建一个会话：第一个词是模式 id（可选，缺省用 defaultMode 配置），其余作为第一条任务。例：/new life-finance 今天的投资日报。',
+    detail: '新建一个会话：第一个词是模式 id（可选，缺省用 defaultMode 配置），其余作为第一条任务。例：/new 代码助手 帮我写个冒泡排序。',
     run: async (node, peerId, args) => {
       const { mode, prompt } = await parseNewArgs(node, args)
       await node.createSession(peerId, prompt, mode)
@@ -426,8 +426,21 @@ export function helpText(commandId?: string): string {
     if (!spec) return `❓ 没有命令 /${commandId}。回复 /help 查看全部。`
     return `🤖 /${spec.id}\n用法: ${spec.usage}\n\n${spec.detail}`
   }
-  const lines = COMMANDS.map((c) => `/${c.id} — ${c.summary}`)
-  return `🤖 dsh-wechat-bridge 命令\n${lines.join('\n')}\n\n/help <命令> 查看详情`
+  // Categorized overview — one short line per command, grouped for scanning
+  // on a phone screen (each group ≤ 5 lines).
+  const groups: Array<[string, string[]]> = [
+    ['会话', ['modes', 'new', 'sessions', 'use', 'retry', 'close']],
+    ['模型/工作区', ['model', 'workspace']],
+    ['审批', ['yes', 'no']],
+    ['其他', ['status', 'stop', 'thinking', 'export', 'card', 'help']],
+  ]
+  const sections = groups
+    .map(([title, ids]) => {
+      const lines = COMMANDS.filter((c) => ids.includes(c.id)).map((c) => `/${c.id} — ${c.summary}`)
+      return lines.length > 0 ? `▍${title}\n${lines.join('\n')}` : ''
+    })
+    .filter(Boolean)
+  return `🤖 dsh-wechat-bridge 命令\n${sections.join('\n')}\n\n/help <命令> 查看详情`
 }
 
 /** New P1/P2 commands appended to the registry (defined after the core list). */

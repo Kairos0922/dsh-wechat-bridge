@@ -55,6 +55,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `cwd` | — | `/new` 会话默认工作目录 |
 | `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略 |
 | `minSendIntervalMs` | 5000 | 出站最小发送间隔（限流卫生） |
+| `typingHeartbeatSec` | 25 | 长任务期间重发「正在输入」的间隔（0=关闭） |
 | `maxMessageChars` | 2000 | 单条气泡上限 |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件） |
 

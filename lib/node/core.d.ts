@@ -44,6 +44,8 @@ export interface ResolvedNodeConfig {
     sessionExpiredPauseMin: number;
     /** How often the thinking digest refreshes while a turn is active (sec). */
     thinkingDigestSec: number;
+    /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
+    typingHeartbeatSec: number;
     /** Numbered choice menus expire after this (sec). */
     menuTimeoutSec: number;
     /** WeChat-bound Markdown rendering policy. */
