@@ -7,8 +7,10 @@
  * - text is extracted from `text_item` (and `voice_item.text` transcription
  *   when WeChat supplied no downloadable audio);
  * - commands are handled locally; everything else becomes a user message on
- *   the active agent via `agent.followup`.
- * - media-only messages are ignored (image-in-session arrives in M3).
+ *   the sender's active agent via `agent.followup`;
+ * - images are downloaded locally and handed to the agent as paths — the
+ *   WeChat ack shows a count, never machine paths (mobile users cannot act on
+ *   them and they leak directory structure).
  *
  * @module dsh-wechat-bridge/node/inbound
  */
@@ -24,7 +26,6 @@ import {
   type InboundMessage,
 } from '../gateway/types.ts'
 import type { WechatBridgeNode } from './core.ts'
-import { routeCommand } from './commands.ts'
 import { sendTextToPeer } from './outbound.ts'
 import { resolveDshHome } from './presets.ts'
 import { debugLog } from '../debug-log.ts'
@@ -58,18 +59,17 @@ export function extractText(message: InboundMessage): string {
 /**
  * Download inbound images to the local workspace and hand the paths to the
  * agent (differentiator #2 — image-in-session). Media bytes never leave the
- * machine beyond the CDN download itself.
+ * machine beyond the CDN download itself. The peer gets a count-only ack.
  */
 async function handleImages(
   node: WechatBridgeNode,
+  peerId: string,
   message: InboundMessage,
   images: ImageItem[],
   text: string,
 ): Promise<void> {
-  const dir = path.join(
-    node.resolved.mediaDir ?? defaultMediaDir(),
-    String(node.activeSessionId ?? 'unbound'),
-  )
+  const sessionId = node.activeSession(peerId)?.id ?? 'unbound'
+  const dir = path.join(node.resolved.mediaDir ?? defaultMediaDir(), String(sessionId))
   fs.mkdirSync(dir, { recursive: true })
   const saved: string[] = []
   for (let i = 0; i < images.length; i++) {
@@ -84,11 +84,14 @@ async function handleImages(
   }
   const parts = [text.trim()]
   if (saved.length > 0) {
-    parts.push(`📷 已接收图片（本地路径）:\n${saved.map((p) => `- ${p}`).join('\n')}`)
+    parts.push(`📷 用户发来 ${saved.length} 张图片（本地路径）:\n${saved.map((p) => `- ${p}`).join('\n')}`)
   }
   const combined = parts.filter(Boolean).join('\n\n')
+  if (saved.length > 0) {
+    void sendTextToPeer(node, peerId, `✅ 已收到 ${saved.length} 张图片，交给会话处理中…`, { kind: 'system' })
+  }
   if (!combined.trim()) return
-  await node.handleText(combined)
+  await node.handleText(peerId, combined)
 }
 
 /** Whether a message belongs to a group chat (MVP: not supported, ignored). */
@@ -99,23 +102,38 @@ export function isGroupMessage(message: InboundMessage): boolean {
 
 /** Handle one inbound iLink message. */
 export async function handleInbound(node: WechatBridgeNode, payload: InboundEvent): Promise<void> {
-  const { message, senderId, contextToken } = payload
+  const { message, senderId, contextToken, runId } = payload
   if (!senderId) return
 
   // ---- allowlist gate: the security boundary ------------------------------
-  const allowed = node.isAllowed(senderId)
-  debugLog({ event: 'gate', from: senderId, allowed })
-  if (!allowed) {
-    node.ctx.logger.info(
-      '[dsh-wechat-bridge] ignoring message from non-allowlisted sender %s (never fed to the model)',
-      senderId,
-    )
-    return
-  }
-
-  if (isGroupMessage(message)) {
-    node.ctx.logger.info('[dsh-wechat-bridge] ignoring group message from %s (MVP: no group support)', senderId)
-    return
+  // 1:1 = global allowFrom. Groups = room-level two-tier gate: the room must
+  // be listed in allowGroups AND the sender must be in that room's allowFrom.
+  const groupId = String(message.group_id ?? message.room_id ?? message.chat_room_id ?? '').trim()
+  let peerKey = senderId
+  let target = senderId
+  if (groupId) {
+    const entry = node.resolved.allowGroups.find((group) => group.roomId === groupId)
+    debugLog({ event: 'gate', from: senderId, group: groupId, allowed: Boolean(entry) })
+    if (!entry) {
+      node.ctx.logger.info('[dsh-wechat-bridge] ignoring group message from %s: room %s not allowlisted', senderId, groupId)
+      return
+    }
+    if (!entry.allowFrom.includes(senderId)) {
+      node.ctx.logger.info('[dsh-wechat-bridge] ignoring group message from %s: sender not allowlisted for room %s', senderId, groupId)
+      return
+    }
+    peerKey = `group:${groupId}`
+    target = groupId
+  } else {
+    const allowed = node.isAllowed(senderId)
+    debugLog({ event: 'gate', from: senderId, allowed })
+    if (!allowed) {
+      node.ctx.logger.info(
+        '[dsh-wechat-bridge] ignoring message from non-allowlisted sender %s (never fed to the model)',
+        senderId,
+      )
+      return
+    }
   }
 
   const images = (message.item_list ?? [])
@@ -123,11 +141,12 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
     .map((item) => item.image_item ?? {})
   const text = extractText(message)
 
-  node.peerId = senderId
-  node.peerContextToken = contextToken ?? null
+  node.setPeerTarget(peerKey, target)
+  node.setPeerContextToken(peerKey, contextToken ?? null)
+  node.setPeerRunId(peerKey, runId ?? null)
 
   if (images.length > 0) {
-    await handleImages(node, message, images, text)
+    await handleImages(node, peerKey, message, images, text)
     return
   }
   if (!text.trim()) {
@@ -135,8 +154,5 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
     return
   }
 
-  await node.handleText(text)
+  await node.handleText(peerKey, text)
 }
-
-// Re-export for core.ts
-export { routeCommand, sendTextToPeer }

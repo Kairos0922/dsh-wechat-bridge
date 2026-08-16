@@ -13,7 +13,7 @@
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type QrLoginStatus } from './ilink-client.ts';
-import { type ImageItem, type InboundEvent, type WechatCredentials } from './types.ts';
+import { type ImageItem, type InboundEvent, type MessageItem, type SendResult, type WechatCredentials } from './types.ts';
 export interface GatewayConfig {
     baseUrl?: string;
     cdnBaseUrl?: string;
@@ -87,7 +87,17 @@ export declare class WechatGateway extends Service {
     private c;
     private stopPolling;
     private pollAbort;
-    private seenMsgIds;
+    /** Durable inbound dedup — survives restart (the poll cursor does not). */
+    private seen;
+    /** Last send failure facts for the status panel and outbox pause display. */
+    lastSendError: {
+        errcode?: number;
+        errmsg?: string;
+        at: number;
+    } | null;
+    private typingTickets;
+    private ticketRetryAt;
+    private ticketBackoffMs;
     constructor(ctx: Context, config: GatewayConfig);
     /** Resolve credentials: explicit config first, then the credentials service. */
     resolveCredentials(): Promise<WechatCredentials | null>;
@@ -123,13 +133,51 @@ export declare class WechatGateway extends Service {
         data: Buffer;
         ext: string;
     }>;
-    /** Send a text message to a peer. Returns true on success. */
+    /** Send one structured message item (text or bot progress card). */
+    sendItem(params: {
+        toUserId: string;
+        item: MessageItem;
+        contextToken?: string;
+        runId?: string;
+        creds?: WechatCredentials;
+    }): Promise<SendResult>;
+    /** Send a text message to a peer. Returns a structured result. */
     sendText(params: {
         toUserId: string;
         text: string;
         contextToken?: string;
+        runId?: string;
         creds?: WechatCredentials;
-    }): Promise<boolean>;
+    }): Promise<SendResult>;
+    /**
+     * Upload a local file to the WeChat CDN and send it as a message item.
+     * Full pipeline per the official upload flow: getUploadUrl → AES-128-ECB →
+     * CDN POST → sendMessage with the CDN reference. mediaType FILE or IMAGE.
+     */
+    private uploadAndSendMedia;
+    /** Send a local file as a WeChat file attachment. */
+    sendFile(params: {
+        toUserId: string;
+        filePath: string;
+        fileName: string;
+        contextToken?: string;
+        runId?: string;
+        creds?: WechatCredentials;
+    }): Promise<SendResult>;
+    /** Send a local image as a WeChat image message (long-card pipeline). */
+    sendImage(params: {
+        toUserId: string;
+        filePath: string;
+        contextToken?: string;
+        runId?: string;
+        creds?: WechatCredentials;
+    }): Promise<SendResult>;
+    /**
+     * Resolve a cached typing ticket (port of the official WeixinConfigManager:
+     * 24h TTL, exponential backoff 2s→1h on failure), per-user like the
+     * official per-account cache.
+     */
+    private resolveTypingTicket;
     /** Send a typing indicator (1 = typing, 2 = cancel). */
     sendTypingIndicator(params: {
         toUserId: string;

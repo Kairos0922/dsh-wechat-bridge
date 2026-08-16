@@ -8,6 +8,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { WechatGateway } from './gateway/index.ts';
+import type { WechatBridgeNode } from './node/core.ts';
 /** Minimal structural typing for the dsh-web `webServer` service seam. */
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -20,18 +21,6 @@ declare module '@deepseek-ai/cordis' {
         };
     }
 }
-/** Stateless node facts the panel needs (mirrors the bridge node's view). */
-export interface HostNodeInfo {
-    resolved: {
-        allowFrom: string[];
-        defaultMode?: string;
-    };
-    presets: {
-        list(): Array<{
-            id: string;
-        }>;
-    };
-}
 /** Register the settings-panel endpoints on the harness web server. */
-export declare function registerHostApi(ctx: Context, gateway: WechatGateway, node: HostNodeInfo): void;
+export declare function registerHostApi(ctx: Context, gateway: WechatGateway, node: WechatBridgeNode): void;
 //# sourceMappingURL=host-api.d.ts.map

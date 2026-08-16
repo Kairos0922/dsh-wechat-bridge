@@ -1,63 +1,68 @@
 /**
- * PresetRegistry unit tests — fixture dirs, no live DSH needed.
+ * Mode discovery unit tests — fake `agentPresets` service, no live DSH needed.
  */
 
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
 import test from 'node:test'
 
-import { PresetRegistry, discoverPresets } from '../src/node/presets.ts'
+import { listModes, resolveMode } from '../src/node/presets.ts'
 
-function makeFixture(entries: Array<[string, boolean]>): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-presets-'))
-  for (const [id, withManifest] of entries) {
-    const presetDir = path.join(dir, id)
-    fs.mkdirSync(presetDir)
-    if (withManifest) fs.writeFileSync(path.join(presetDir, 'agent.cordis.yml'), 'agent: true\n')
-  }
-  return dir
+function fakeCtx(presets: Array<{ id: string; name?: string; description?: string; order?: number; broken?: string }>) {
+  return {
+    agentPresets: { list: async () => presets },
+  } as never
 }
 
-test('discoverPresets lists only dirs with agent.cordis.yml, sorted', () => {
-  const dir = makeFixture([
-    ['life-butler', true],
-    ['life-finance', true],
-    ['junk-dir', false],
-  ])
-  const presets = discoverPresets(dir)
-  assert.deepEqual(
-    presets.map((p) => p.id),
-    ['life-butler', 'life-finance'],
+test('listModes returns metadata-annotated presets in order', async () => {
+  const modes = await listModes(
+    fakeCtx([
+      { id: 'z-last', name: 'Z', order: 2 },
+      { id: 'a-first', name: 'A 模式', description: '第一个', order: 1 },
+    ]),
   )
-  fs.rmSync(dir, { recursive: true, force: true })
+  assert.deepEqual(
+    modes.map((m) => m.id),
+    ['a-first', 'z-last'],
+  )
+  assert.equal(modes[0]!.name, 'A 模式')
+  assert.equal(modes[0]!.description, '第一个')
 })
 
-test('discoverPresets returns [] for a missing dir', () => {
-  assert.deepEqual(discoverPresets('/nonexistent/definitely-missing'), [])
+test('listModes skips broken presets', async () => {
+  const modes = await listModes(
+    fakeCtx([
+      { id: 'good' },
+      { id: 'broken', broken: 'bad yaml' },
+    ]),
+  )
+  assert.deepEqual(
+    modes.map((m) => m.id),
+    ['good'],
+  )
 })
 
-test('resolveMode prefers explicit, falls back to default, rejects unknown', () => {
-  // Build a fake DSH_HOME with .agent-presets inside it.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-home-'))
-  const presetsDir = path.join(home, '.agent-presets')
-  for (const id of ['life-butler', 'life-career']) {
-    const dir = path.join(presetsDir, id)
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'agent.cordis.yml'), 'agent: true\n')
-  }
-  const origHome = process.env.DSH_HOME
-  process.env.DSH_HOME = home
-  const registry = new PresetRegistry()
-  try {
-    assert.equal(registry.resolveMode('life-career', 'life-butler'), 'life-career')
-    assert.equal(registry.resolveMode(undefined, 'life-butler'), 'life-butler')
-    assert.equal(registry.resolveMode('unknown-mode', 'life-butler'), 'life-butler')
-    assert.equal(registry.resolveMode(undefined, undefined), undefined)
-  } finally {
-    if (origHome === undefined) delete process.env.DSH_HOME
-    else process.env.DSH_HOME = origHome
-    fs.rmSync(home, { recursive: true, force: true })
-  }
+test('listModes degrades to empty when the service throws', async () => {
+  const ctx = {
+    agentPresets: {
+      list: async () => {
+        throw new Error('no service')
+      },
+    },
+  } as never
+  assert.deepEqual(await listModes(ctx), [])
+})
+
+test('resolveMode prefers an explicit known mode', async () => {
+  const ctx = fakeCtx([{ id: 'life-finance' }])
+  assert.equal(await resolveMode(ctx, 'life-finance', 'life-butler'), 'life-finance')
+})
+
+test('resolveMode rejects unknown explicit modes and falls back to the default', async () => {
+  const ctx = fakeCtx([{ id: 'life-butler' }])
+  assert.equal(await resolveMode(ctx, 'nope', 'life-butler'), 'life-butler')
+})
+
+test('resolveMode returns undefined when neither matches', async () => {
+  const ctx = fakeCtx([])
+  assert.equal(await resolveMode(ctx, 'nope', 'also-nope'), undefined)
 })

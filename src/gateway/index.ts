@@ -13,6 +13,8 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import fs from 'node:fs'
+import path from 'node:path'
 import QRCode from 'qrcode'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
@@ -20,27 +22,37 @@ import {
   fetchQrCode,
   getConfig,
   getUpdates,
+  getUploadUrl,
   notifyStart,
   notifyStop,
   pollQrStatus,
   sendMessage,
   sendTyping,
+  IlinkSendError,
   type QrLoginStatus,
 } from './ilink-client.ts'
 import {
   ILINK_BASE_URL,
+  ITEM_FILE,
+  ITEM_IMAGE,
   ITEM_TEXT,
-  MESSAGE_DEDUP_TTL_SECONDS,
+  ITEM_VIDEO,
   MESSAGE_TYPE_USER,
   RATE_LIMIT_ERRCODE,
   SESSION_EXPIRED_ERRCODE,
+  UPLOAD_MEDIA_FILE,
+  UPLOAD_MEDIA_IMAGE,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
+  type MessageItem,
+  type SendResult,
   type WechatCredentials,
 } from './types.ts'
 import { downloadImage as downloadImageMedia } from './media.ts'
+import { aesEcbPaddedSize, encodeMediaAesKey, md5Hex, randomHex, uploadBufferToCdn, UPLOAD_MAX_BYTES } from './upload.ts'
 import { debugLog } from '../debug-log.ts'
+import { SeenStore } from '../seen.ts'
 
 export interface GatewayConfig {
   baseUrl?: string
@@ -105,7 +117,18 @@ export class WechatGateway extends Service {
   private c: ResolvedGatewayConfig
   private stopPolling = false
   private pollAbort: AbortController | null = null
-  private seenMsgIds = new Map<number, number>()
+  /** Durable inbound dedup — survives restart (the poll cursor does not). */
+  private seen = new SeenStore()
+  /** Last send failure facts for the status panel and outbox pause display. */
+  lastSendError: { errcode?: number; errmsg?: string; at: number } | null = null
+
+  // ---- typing-ticket cache (port of the official WeixinConfigManager) ----
+  // getConfig is an extra API call per indicator; caching keeps bursts from
+  // consuming the channel's rate budget. TTL 24h, exponential backoff 2s→1h.
+  // Keyed per user like the official per-account cache.
+  private typingTickets = new Map<string, { value: string; expiresAt: number }>()
+  private ticketRetryAt = 0
+  private ticketBackoffMs = 2_000
 
   constructor(ctx: Context, config: GatewayConfig) {
     super(ctx, 'wechat')
@@ -122,6 +145,7 @@ export class WechatGateway extends Service {
         this.status = 'stopped'
         this.stopPolling = true
         this.pollAbort?.abort()
+        this.seen.dispose()
         // Best-effort farewell so the server flips the channel state promptly.
         void this.resolveCredentials().then((creds) => {
           if (creds?.botToken) {
@@ -389,19 +413,12 @@ export class WechatGateway extends Service {
   }
 
   private handleBatch(msgs: InboundMessage[]): void {
-    const now = Date.now()
     for (const msg of msgs) {
       if (msg.message_type !== MESSAGE_TYPE_USER) continue
       const id = msg.message_id
       if (id !== undefined && id !== null) {
-        const seenAt = this.seenMsgIds.get(id)
-        if (seenAt !== undefined && now - seenAt < MESSAGE_DEDUP_TTL_SECONDS * 1000) continue
-        this.seenMsgIds.set(id, now)
-        if (this.seenMsgIds.size > 500) {
-          for (const [k, v] of this.seenMsgIds) {
-            if (now - v > MESSAGE_DEDUP_TTL_SECONDS * 1000) this.seenMsgIds.delete(k)
-          }
-        }
+        if (this.seen.has(id)) continue
+        this.seen.mark(id)
       }
       const senderId = msg.from_user_id ?? ''
       if (!senderId) continue
@@ -409,6 +426,7 @@ export class WechatGateway extends Service {
         message: msg,
         senderId,
         contextToken: msg.context_token,
+        runId: msg.run_id,
       }
       const text = msg.item_list
         ?.filter((item) => item.type === ITEM_TEXT)
@@ -419,8 +437,15 @@ export class WechatGateway extends Service {
         msgId: id ?? null,
         from: senderId,
         ctxToken: msg.context_token ?? null,
+        runId: msg.run_id ?? null,
         itemTypes: (msg.item_list ?? []).map((i) => i.type),
         text: (text ?? '').slice(0, 120) || null,
+        // Media-structure capture: the official client's OWN outbound media
+        // shape for this backend (ground truth for the outbound media gate —
+        // see docs/porting-notes.md §6). Logged verbatim for analysis.
+        mediaItems: (msg.item_list ?? [])
+          .filter((item) => item.type === ITEM_IMAGE || item.type === ITEM_FILE || item.type === ITEM_VIDEO)
+          .map((item) => JSON.stringify(item).slice(0, 1200)),
       })
       this.ctx.emit('wechat/message', payload)
       if (text) {
@@ -436,17 +461,17 @@ export class WechatGateway extends Service {
     return downloadImageMedia({ item, cdnBaseUrl: this.c.cdnBaseUrl })
   }
 
-  /** Send a text message to a peer. Returns true on success. */
-  async sendText(params: {
+  /** Send one structured message item (text or bot progress card). */
+  async sendItem(params: {
     toUserId: string
-    text: string
+    item: MessageItem
     contextToken?: string
+    runId?: string
     creds?: WechatCredentials
-  }): Promise<boolean> {
+  }): Promise<SendResult> {
     const creds = params.creds ?? (await this.resolveCredentials())
     if (!creds?.botToken) {
-      debugLog({ event: 'send', to: params.toUserId, ok: false, error: 'no credentials' })
-      return false
+      return { ok: false, errmsg: 'no credentials' }
     }
     try {
       const resp = await sendMessage({
@@ -455,24 +480,206 @@ export class WechatGateway extends Service {
         body: {
           to_user_id: params.toUserId,
           context_token: params.contextToken,
-          item_list: [{ type: ITEM_TEXT, text_item: { text: params.text } }],
+          run_id: params.runId,
+          item_list: [params.item],
         },
       })
+      const result: SendResult = {
+        ok: true,
+        ret: resp.ret,
+        errcode: resp.errcode,
+        errmsg: resp.errmsg,
+        messageId: resp.message_id,
+      }
+      // A success clears the sticky failure banner on the settings panel.
+      this.lastSendError = null
       debugLog({
         event: 'send',
         to: params.toUserId,
         ok: true,
-        len: params.text.length,
+        itemType: params.item.type ?? null,
+        len: params.item.text_item?.text?.length ?? null,
         ctxToken: params.contextToken ?? null,
-        text: params.text.slice(0, 60),
+        text: params.item.text_item?.text?.slice(0, 60) ?? null,
         resp,
       })
-      return true
+      return result
     } catch (err) {
-      debugLog({ event: 'send', to: params.toUserId, ok: false, error: String(err).slice(0, 200) })
-      this.ctx.logger.warn('[dsh-wechat-bridge] sendText failed: %s', String(err))
-      return false
+      const record = {
+        ok: false,
+        ret: err instanceof IlinkSendError ? err.ret : undefined,
+        errcode: err instanceof IlinkSendError ? err.errcode : undefined,
+        errmsg: err instanceof Error ? err.message : String(err),
+      }
+      this.lastSendError = { errcode: record.errcode, errmsg: record.errmsg.slice(0, 200), at: Date.now() }
+      debugLog({ event: 'send', to: params.toUserId, ...record })
+      return record
     }
+  }
+
+  /** Send a text message to a peer. Returns a structured result. */
+  async sendText(params: {
+    toUserId: string
+    text: string
+    contextToken?: string
+    runId?: string
+    creds?: WechatCredentials
+  }): Promise<SendResult> {
+    return this.sendItem({
+      toUserId: params.toUserId,
+      contextToken: params.contextToken,
+      runId: params.runId,
+      creds: params.creds,
+      item: { type: ITEM_TEXT, text_item: { text: params.text } },
+    })
+  }
+
+  /**
+   * Upload a local file to the WeChat CDN and send it as a message item.
+   * Full pipeline per the official upload flow: getUploadUrl → AES-128-ECB →
+   * CDN POST → sendMessage with the CDN reference. mediaType FILE or IMAGE.
+   */
+  private async uploadAndSendMedia(params: {
+    toUserId: string
+    filePath: string
+    fileName: string
+    mediaType: number
+    contextToken?: string
+    runId?: string
+    creds?: WechatCredentials
+  }): Promise<SendResult> {
+    const creds = params.creds ?? (await this.resolveCredentials())
+    if (!creds?.botToken) return { ok: false, errmsg: 'no credentials' }
+    try {
+      const plaintext = fs.readFileSync(params.filePath)
+      if (plaintext.length > UPLOAD_MAX_BYTES) {
+        return { ok: false, errmsg: `file too large (${plaintext.length} bytes > ${UPLOAD_MAX_BYTES})` }
+      }
+      const rawsize = plaintext.length
+      const filesize = aesEcbPaddedSize(rawsize)
+      const filekey = randomHex(16)
+      const aeskey = Buffer.from(randomHex(16), 'hex')
+      const slot = await getUploadUrl({
+        baseUrl: creds.baseUrl || this.c.baseUrl,
+        token: creds.botToken,
+        filekey,
+        mediaType: params.mediaType,
+        toUserId: params.toUserId,
+        rawsize,
+        rawfilemd5: md5Hex(plaintext),
+        filesize,
+        aeskey: aeskey.toString('hex'),
+      })
+      if (slot.ret && slot.ret !== 0) {
+        const result: SendResult = { ok: false, ret: slot.ret, errcode: slot.errcode, errmsg: slot.errmsg }
+        this.lastSendError = { errcode: slot.errcode, errmsg: (slot.errmsg ?? '').slice(0, 200), at: Date.now() }
+        debugLog({ event: 'send-media', to: params.toUserId, ok: false, ret: slot.ret, errcode: slot.errcode })
+        return result
+      }
+      const { downloadParam } = await uploadBufferToCdn({
+        buf: plaintext,
+        uploadFullUrl: slot.upload_full_url,
+        uploadParam: slot.upload_param,
+        filekey,
+        cdnBaseUrl: this.c.cdnBaseUrl,
+        aeskey,
+      })
+      // Outbound-media protocol shape — EXACT mirror of the official client's
+      // own outbound items (captured from real inbound media messages):
+      // - encrypt_query_param = the LONG getUploadUrl upload_param structure
+      //   (NOT the CDN x-encrypted-param header — that one delivers a bubble
+      //   but its content fetch is rejected with 400 on download);
+      // - aes_key = base64 of the key's HEX STRING (44 chars) — the official
+      //   client's encoding (its inbound media.aes_key decodes to the hex);
+      // - full_url = the complete download URL with the same param — the
+      //   official client carries it verbatim;
+      // - NO encrypt_type (the official outbound shape carries none; sending
+      //   one alongside these fields trips prepare validation).
+      const uploadParam = slot.upload_param?.trim()
+      if (!uploadParam) {
+        return { ok: false, errmsg: 'getUploadUrl returned no upload_param' }
+      }
+      const fullUrl = `${this.c.cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(uploadParam)}`
+      const media = {
+        encrypt_query_param: uploadParam,
+        aes_key: encodeMediaAesKey(aeskey),
+        full_url: fullUrl,
+      }
+      const item: MessageItem =
+        params.mediaType === UPLOAD_MEDIA_IMAGE
+          ? { type: ITEM_IMAGE, image_item: { aeskey: aeskey.toString('hex'), media, mid_size: filesize } }
+          : { type: ITEM_FILE, file_item: { media, file_name: params.fileName, len: String(rawsize) } }
+      return this.sendItem({
+        toUserId: params.toUserId,
+        contextToken: params.contextToken,
+        runId: params.runId,
+        creds,
+        item,
+      })
+    } catch (err) {
+      const record: SendResult = { ok: false, errmsg: err instanceof Error ? err.message : String(err) }
+      this.lastSendError = { errmsg: record.errmsg!.slice(0, 200), at: Date.now() }
+      debugLog({ event: 'send-media', to: params.toUserId, ok: false, error: record.errmsg!.slice(0, 200) })
+      return record
+    }
+  }
+
+  /** Send a local file as a WeChat file attachment. */
+  async sendFile(params: {
+    toUserId: string
+    filePath: string
+    fileName: string
+    contextToken?: string
+    runId?: string
+    creds?: WechatCredentials
+  }): Promise<SendResult> {
+    return this.uploadAndSendMedia({ ...params, mediaType: UPLOAD_MEDIA_FILE })
+  }
+
+  /** Send a local image as a WeChat image message (long-card pipeline). */
+  async sendImage(params: {
+    toUserId: string
+    filePath: string
+    contextToken?: string
+    runId?: string
+    creds?: WechatCredentials
+  }): Promise<SendResult> {
+    return this.uploadAndSendMedia({ ...params, fileName: path.basename(params.filePath), mediaType: UPLOAD_MEDIA_IMAGE })
+  }
+
+  /**
+   * Resolve a cached typing ticket (port of the official WeixinConfigManager:
+   * 24h TTL, exponential backoff 2s→1h on failure), per-user like the
+   * official per-account cache.
+   */
+  private async resolveTypingTicket(
+    creds: WechatCredentials,
+    ilinkUserId: string,
+    contextToken?: string,
+  ): Promise<string | null> {
+    const cached = this.typingTickets.get(ilinkUserId)
+    if (cached !== undefined && Date.now() < cached.expiresAt) {
+      return cached.value
+    }
+    if (Date.now() < this.ticketRetryAt) return null
+    try {
+      const cfg = await getConfig({
+        baseUrl: creds.baseUrl || this.c.baseUrl,
+        token: creds.botToken,
+        ilinkUserId,
+        contextToken,
+      })
+      if (cfg.typing_ticket) {
+        this.typingTickets.set(ilinkUserId, { value: cfg.typing_ticket, expiresAt: Date.now() + 24 * 60 * 60 * 1000 })
+        this.ticketBackoffMs = 2_000
+        return cfg.typing_ticket
+      }
+    } catch {
+      // fall through to backoff
+    }
+    this.ticketRetryAt = Date.now() + this.ticketBackoffMs
+    this.ticketBackoffMs = Math.min(this.ticketBackoffMs * 2, 60 * 60 * 1000)
+    return null
   }
 
   /** Send a typing indicator (1 = typing, 2 = cancel). */
@@ -485,18 +692,13 @@ export class WechatGateway extends Service {
     const creds = params.creds ?? (await this.resolveCredentials())
     if (!creds?.botToken) return
     try {
-      const cfg = await getConfig({
-        baseUrl: creds.baseUrl || this.c.baseUrl,
-        token: creds.botToken,
-        ilinkUserId: params.toUserId,
-        contextToken: params.contextToken,
-      })
-      if (!cfg.typing_ticket) return
+      const ticket = await this.resolveTypingTicket(creds, params.toUserId, params.contextToken)
+      if (!ticket) return
       await sendTyping({
         baseUrl: creds.baseUrl || this.c.baseUrl,
         token: creds.botToken,
         ilinkUserId: params.toUserId,
-        typingTicket: cfg.typing_ticket,
+        typingTicket: ticket,
         status: params.status,
       })
     } catch (err) {

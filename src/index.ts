@@ -21,6 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import { ILINK_BASE_URL, WEIXIN_CDN_BASE_URL } from './gateway/types.ts'
 import { WechatGateway } from './gateway/index.ts'
 import { wechatBridgeNode } from './node/index.ts'
+import type { MarkdownMode } from './node/markdown.ts'
 
 export { WechatGateway } from './gateway/index.ts'
 export { wechatBridgeNode } from './node/index.ts'
@@ -36,14 +37,28 @@ export const inject = ['sessions', 'agents', 'approval', 'credentials', 'webServ
 export interface Config {
   /** Hard allowlist of WeChat sender ids. REQUIRED — no permissive default. */
   allowFrom?: string[]
-  /** Heartbeat interval for progress digests (seconds; 0 disables). */
-  digestIntervalSec?: number
   /** Approval prompt timeout before default-deny (seconds). */
   approvalTimeoutSec?: number
   /** Max chars per WeChat bubble. */
   maxMessageChars?: number
-  /** Throttle between outbound bubbles (ms). */
-  sendChunkDelayMs?: number
+  /** Minimum spacing between outbound sends (rate-limit hygiene, ms). */
+  minSendIntervalMs?: number
+  /** Escalating pause steps after errcode -12 (rate limit), seconds. */
+  rateLimitBackoffSecs?: number[]
+  /** Full outbound pause after errcode -14 (session expired), minutes. */
+  sessionExpiredPauseMin?: number
+  /** Thinking-digest refresh interval while a turn is active (seconds). */
+  thinkingDigestSec?: number
+  /** Numbered choice menus expire after this (seconds). */
+  menuTimeoutSec?: number
+  /** WeChat-bound Markdown rendering policy: passthrough | filter | plain. */
+  markdownMode?: MarkdownMode
+  /**
+   * Tool-name prefixes that get their own progress cards. Empty = disabled
+   * (default): the backend currently drops TOOL_CALL items silently (verified
+   * by send-only probes) — enable when the channel supports them.
+   */
+  progressToolPrefixes?: string[]
   /** Working directory for `/new` sessions. */
   cwd?: string
   /** Default agent preset for sessions created without an explicit mode. */
@@ -54,6 +69,21 @@ export interface Config {
   agentModel?: string
   /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
   mediaDir?: string
+  /** Answers longer than this (chars) ship as a file attachment; 0 = disabled
+   *  (default — the backend cannot fetch bot media content yet, probe-verified). */
+  fileThresholdChars?: number
+  /** Proactively announce task completion (turns ≥ notifyMinTurnSec only). */
+  notifyOnComplete?: boolean
+  /** Minimum turn duration (sec) before completion notifications fire. */
+  notifyMinTurnSec?: number
+  /** Delete media/export files older than this many days. */
+  mediaRetentionDays?: number
+  /** Group chats the bridge may serve: room id → allowed senders. */
+  allowGroups?: Array<{ roomId: string; allowFrom: string[] }>
+  /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
+  cardMode?: 'off' | 'long'
+  /** Chrome binary path for the long-card renderer (auto-detected when unset). */
+  chromePath?: string
   /** iLink gateway base url (defaults to ilinkai.weixin.qq.com). */
   baseUrl?: string
   /** WeChat CDN base url for media. */
@@ -64,17 +94,29 @@ export interface Config {
   accountId?: string
 }
 
-export const Config = z.object({
+export const Config: z<Config> = z.object({
   allowFrom: z.array(z.string()).default([]),
-  digestIntervalSec: z.number().default(300),
   approvalTimeoutSec: z.number().default(600),
   maxMessageChars: z.number().default(2000),
-  sendChunkDelayMs: z.number().default(1_500),
+  minSendIntervalMs: z.number().default(5_000),
+  rateLimitBackoffSecs: z.array(z.number()).default([10, 30, 60]),
+  sessionExpiredPauseMin: z.number().default(60),
+  thinkingDigestSec: z.number().default(10),
+  menuTimeoutSec: z.number().default(60),
+  markdownMode: z.union(['passthrough', 'filter', 'plain']).default('passthrough'),
+  progressToolPrefixes: z.array(z.string()).default([]),
   cwd: z.string(),
   defaultMode: z.string(),
   agentProvider: z.string(),
   agentModel: z.string(),
   mediaDir: z.string(),
+  fileThresholdChars: z.number().default(0),
+  notifyOnComplete: z.boolean().default(false),
+  notifyMinTurnSec: z.number().default(300),
+  mediaRetentionDays: z.number().default(30),
+  allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
+  cardMode: z.union(['off', 'long']).default('off'),
+  chromePath: z.string(),
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
   token: z.string().default(''),
@@ -94,15 +136,27 @@ export function apply(ctx: Context, config: Config): void {
   })
   ctx.plugin(wechatBridgeNode, {
     allowFrom: config.allowFrom ?? [],
-    digestIntervalSec: config.digestIntervalSec,
     approvalTimeoutSec: config.approvalTimeoutSec,
     maxMessageChars: config.maxMessageChars,
-    sendChunkDelayMs: config.sendChunkDelayMs,
+    minSendIntervalMs: config.minSendIntervalMs,
+    rateLimitBackoffSecs: config.rateLimitBackoffSecs,
+    sessionExpiredPauseMin: config.sessionExpiredPauseMin,
+    thinkingDigestSec: config.thinkingDigestSec,
+    menuTimeoutSec: config.menuTimeoutSec,
+    markdownMode: config.markdownMode,
+    progressToolPrefixes: config.progressToolPrefixes,
     cwd: config.cwd,
     defaultMode: config.defaultMode,
     agentProvider: config.agentProvider,
     agentModel: config.agentModel,
     mediaDir: config.mediaDir,
+    fileThresholdChars: config.fileThresholdChars,
+    notifyOnComplete: config.notifyOnComplete,
+    notifyMinTurnSec: config.notifyMinTurnSec,
+    mediaRetentionDays: config.mediaRetentionDays,
+    allowGroups: config.allowGroups,
+    cardMode: config.cardMode,
+    chromePath: config.chromePath,
   })
 }
 

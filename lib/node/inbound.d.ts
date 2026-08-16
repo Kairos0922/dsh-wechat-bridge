@@ -7,15 +7,15 @@
  * - text is extracted from `text_item` (and `voice_item.text` transcription
  *   when WeChat supplied no downloadable audio);
  * - commands are handled locally; everything else becomes a user message on
- *   the active agent via `agent.followup`.
- * - media-only messages are ignored (image-in-session arrives in M3).
+ *   the sender's active agent via `agent.followup`;
+ * - images are downloaded locally and handed to the agent as paths — the
+ *   WeChat ack shows a count, never machine paths (mobile users cannot act on
+ *   them and they leak directory structure).
  *
  * @module dsh-wechat-bridge/node/inbound
  */
 import { type InboundEvent, type InboundMessage } from '../gateway/types.ts';
 import type { WechatBridgeNode } from './core.ts';
-import { routeCommand } from './commands.ts';
-import { sendTextToPeer } from './outbound.ts';
 /** Default media dir (per-bridge, under DSH storages). */
 export declare function defaultMediaDir(): string;
 /** Extract the visible text of an inbound message (text + voice transcription). */
@@ -24,5 +24,4 @@ export declare function extractText(message: InboundMessage): string;
 export declare function isGroupMessage(message: InboundMessage): boolean;
 /** Handle one inbound iLink message. */
 export declare function handleInbound(node: WechatBridgeNode, payload: InboundEvent): Promise<void>;
-export { routeCommand, sendTextToPeer };
 //# sourceMappingURL=inbound.d.ts.map

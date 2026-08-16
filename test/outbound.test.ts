@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  digestLine,
+  isProgressTool,
   normalizeMarkdownBlocks,
   splitForWechat,
   textOfAssistantMessage,
@@ -47,10 +47,15 @@ test('textOfAssistantMessage joins text blocks only', () => {
   assert.equal(text, '第一段\n第二段')
 })
 
-test('digestLine reports in-progress turns', () => {
-  const line = digestLine({
-    events: [{ type: 'turn/start', data: { turn: 2 } }, { type: 'tool/call', data: { name: 'bash' } }],
-  } as never)
-  assert.match(line, /第 2 轮/)
-  assert.match(line, /1 个工具调用/)
+test('isProgressTool: empty prefix list disables cards entirely', () => {
+  const node = { resolved: { progressToolPrefixes: [] } } as never
+  assert.equal(isProgressTool(node, 'bash'), false)
+  assert.equal(isProgressTool(node, 'fs'), false)
+})
+
+test('isProgressTool: non-empty list cards only matching prefixes', () => {
+  const node = { resolved: { progressToolPrefixes: ['bash', 'fs'] } } as never
+  assert.equal(isProgressTool(node, 'bash'), true)
+  assert.equal(isProgressTool(node, 'fs-search'), true)
+  assert.equal(isProgressTool(node, 'web'), false)
 })

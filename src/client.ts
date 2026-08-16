@@ -41,15 +41,26 @@ const zh = {
   allowFrom: '白名单（allowFrom）',
   modes: '可用模式',
   defaultMode: '默认模式',
+  prefs: '桥内偏好（对 /new 生效）',
+  prefsModel: '模型',
+  prefsCwd: '工作区',
+  prefsDefault: '跟随 DSH 默认',
+  markdownMode: 'Markdown 策略',
+  outbox: '出站队列',
+  outboxPending: '{n} 条待发',
+  outboxPaused: '限流暂停中',
+  outboxIdle: '空闲',
   pair: '扫码配对',
   pairing: '配对中…请用微信扫码',
   pairHint: '二维码 5 分钟过期，过期会自动刷新。',
   emptyAllowlist: '（空——需在 profile 配置中填写 allowFrom 才会应答消息）',
   helpTitle: '微信命令',
   help: [
-    '/modes — 列出可用模式',
+    '/modes — 全部模式（中文说明 + 编号快捷）',
     '/new [模式] <prompt> — 新建会话',
+    '/model · /workspace — 切换模型/工作区',
     '/use N / /sessions / /stop / /status',
+    '/retry / /close / /help — 重试 / 归档 / 帮助',
     '/yes /no — 回应权限请求',
   ].join('\n'),
   requestFailed: '状态读取失败',
@@ -65,21 +76,38 @@ const en = {
   allowFrom: 'Allowlist (allowFrom)',
   modes: 'Available modes',
   defaultMode: 'Default mode',
+  prefs: 'Bridge prefs (apply to /new)',
+  prefsModel: 'Model',
+  prefsCwd: 'Workspace',
+  prefsDefault: 'Follow DSH default',
+  markdownMode: 'Markdown policy',
+  outbox: 'Outbound queue',
+  outboxPending: '{n} pending',
+  outboxPaused: 'Rate-limit pause',
+  outboxIdle: 'Idle',
   pair: 'Pair via QR',
   pairing: 'Pairing… scan with WeChat',
   pairHint: 'The QR expires after 5 minutes and refreshes automatically.',
   emptyAllowlist: '(empty — fill allowFrom in the profile config to accept messages)',
   helpTitle: 'WeChat commands',
   help: [
-    '/modes — list available modes',
+    '/modes — all modes (annotated + numbered)',
     '/new [mode] <prompt> — create a session',
+    '/model · /workspace — switch model/workspace',
     '/use N / /sessions / /stop / /status',
+    '/retry / /close / /help — retry / archive / help',
     '/yes /no — answer permission requests',
   ].join('\n'),
   requestFailed: 'Failed to load status',
 }
 
 // ---------------------------------------------------------------- data
+
+interface StatusMode {
+  id: string
+  name?: string
+  description?: string
+}
 
 interface Status {
   ok: boolean
@@ -88,8 +116,12 @@ interface Status {
   paired: boolean
   accountId: string | null
   allowFrom: string[]
-  modes: string[]
+  modes: StatusMode[]
   defaultMode: string | null
+  markdownMode: string
+  prefs: { provider?: string; model?: string; cwd?: string }
+  outbox: { pending: number; pausedUntil: number | null }
+  lastSendError: { errcode?: number; errmsg?: string; at: number } | null
 }
 
 function useStatus(): { status: Status | null; refresh: () => Promise<void> } {
@@ -213,10 +245,32 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
         h('span', { style: css.label }, `${t('modes')}${status?.defaultMode ? ` · ${t('defaultMode')}: ${status.defaultMode}` : ''}`),
         h('div', null,
           (status?.modes ?? []).length > 0
-            ? status!.modes.map((id) => h('span', { key: id, style: css.chip }, id))
+            ? status!.modes.map((mode) =>
+                h('span', { key: mode.id, style: css.chip, title: mode.description ?? undefined }, mode.name && mode.name !== mode.id ? `${mode.name}（${mode.id}）` : mode.id),
+              )
             : h('p', { style: css.muted }, '—'),
         ),
       ),
+      h('div', null,
+        h('span', { style: css.label }, `${t('prefs')} · ${t('markdownMode')}: ${status?.markdownMode ?? '…'}`),
+        h('p', { style: css.muted },
+          `${t('prefsModel')}: ${status?.prefs.provider && status.prefs.model ? `${status.prefs.provider}/${status.prefs.model}` : t('prefsDefault')}` +
+          ` · ${t('prefsCwd')}: ${status?.prefs.cwd ?? t('prefsDefault')}`,
+        ),
+      ),
+      h('div', null,
+        h('span', { style: css.label }, t('outbox')),
+        h('p', { style: css.muted },
+          status?.outbox.pausedUntil
+            ? `${t('outboxPaused')}（${Math.max(1, Math.round((status.outbox.pausedUntil - Date.now()) / 1000))}s）`
+            : status?.outbox.pending
+              ? t('outboxPending').replace('{n}', String(status.outbox.pending))
+              : t('outboxIdle'),
+        ),
+      ),
+      status?.lastSendError
+        ? h('p', { style: css.muted }, `⚠ ${t('requestFailed')}: errcode=${status.lastSendError.errcode ?? '-'} ${status.lastSendError.errmsg ?? ''}`)
+        : null,
     ),
     h('div', { style: css.card },
       h('div', { style: css.row },

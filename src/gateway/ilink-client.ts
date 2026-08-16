@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { InboundMessage, UpdatesBatch } from './types.ts'
+import type { InboundMessage, MessageItem, UpdatesBatch } from './types.ts'
 
 export const LOGIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 export const DEFAULT_BOT_TYPE = '3'
@@ -211,19 +211,40 @@ export async function getUpdates(params: GetUpdatesParams): Promise<UpdatesBatch
 export interface SendMessageBody {
   to_user_id: string
   context_token?: string
-  item_list: Array<{ type: number; text_item?: { text?: string } }>
+  /** Echo of the inbound run_id — required for tool-progress card association. */
+  run_id?: string
+  item_list: MessageItem[]
 }
 
 const MESSAGE_TYPE_BOT = 2
 const MESSAGE_STATE_FINISH = 2
 
+/** Structured business-level send failure: ret/errcode/errmsg verbatim. */
+export class IlinkSendError extends Error {
+  readonly ret?: number
+  readonly errcode?: number
+  readonly errmsg?: string
+
+  constructor(ret: number | undefined, errcode: number | undefined, errmsg: string | undefined) {
+    super(`sendMessage ret=${ret ?? '-'} errcode=${errcode ?? '-'} errmsg=${errmsg ?? '(none)'}`)
+    this.name = 'IlinkSendError'
+    this.ret = ret
+    this.errcode = errcode
+    this.errmsg = errmsg
+  }
+}
+
 /**
- * Send a single text message downstream. Returns the parsed response.
+ * Send one complete WeixinMessage downstream. Returns the parsed response.
  *
  * The msg must be a COMPLETE WeixinMessage: the official client always fills
  * `from_user_id: ""`, a per-message `client_id`, `message_type: BOT` and
  * `message_state: FINISH` — messages missing them are acked (ret=0,
  * message_id assigned) but never delivered to the WeChat client.
+ *
+ * A business-level failure (ret != 0) throws {@link IlinkSendError} so callers
+ * can classify rate-limit (-12) and session-expiry (-14) instead of parsing
+ * error text.
  */
 export async function sendMessage(params: {
   baseUrl: string
@@ -243,6 +264,7 @@ export async function sendMessage(params: {
         message_state: MESSAGE_STATE_FINISH,
         item_list: params.body.item_list,
         context_token: params.body.context_token ?? undefined,
+        run_id: params.body.run_id ?? undefined,
       },
       base_info: buildBaseInfo(),
     }),
@@ -256,7 +278,7 @@ export async function sendMessage(params: {
     message_id?: number
   }
   if (resp.ret && resp.ret !== 0) {
-    throw new Error(`sendMessage ret=${resp.ret} errcode=${resp.errcode ?? '-'} errmsg=${resp.errmsg ?? '(none)'}`)
+    throw new IlinkSendError(resp.ret, resp.errcode, resp.errmsg)
   }
   return resp
 }
@@ -304,6 +326,57 @@ export async function sendTyping(params: {
     token: params.token,
     timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
   })
+}
+
+/**
+ * Request a CDN upload slot. Field-for-field port of the official
+ * `getUploadUrl` (GetUploadUrlReq): filekey, media_type, to_user_id, rawsize,
+ * rawfilemd5, filesize (ciphertext size), aeskey (hex), no_need_thumb.
+ */
+export async function getUploadUrl(params: {
+  baseUrl: string
+  token?: string
+  filekey: string
+  mediaType: number
+  toUserId: string
+  rawsize: number
+  rawfilemd5: string
+  filesize: number
+  aeskey: string
+  timeoutMs?: number
+}): Promise<{
+  ret?: number
+  errcode?: number
+  errmsg?: string
+  upload_param?: string
+  thumb_upload_param?: string
+  upload_full_url?: string
+}> {
+  const rawText = await apiPostFetch({
+    baseUrl: params.baseUrl,
+    endpoint: 'ilink/bot/getuploadurl',
+    body: JSON.stringify({
+      filekey: params.filekey,
+      media_type: params.mediaType,
+      to_user_id: params.toUserId,
+      rawsize: params.rawsize,
+      rawfilemd5: params.rawfilemd5,
+      filesize: params.filesize,
+      no_need_thumb: true,
+      aeskey: params.aeskey,
+      base_info: buildBaseInfo(),
+    }),
+    token: params.token,
+    timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
+  })
+  return JSON.parse(rawText) as {
+    ret?: number
+    errcode?: number
+    errmsg?: string
+    upload_param?: string
+    thumb_upload_param?: string
+    upload_full_url?: string
+  }
 }
 
 /**

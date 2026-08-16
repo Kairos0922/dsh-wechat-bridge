@@ -1,28 +1,42 @@
 /**
- * PresetRegistry — dynamic discovery of the current user's agent presets.
+ * Preset/mode discovery — backed by the DSH `agentPresets` service.
  *
- * Differentiator #1: instead of a single hardcoded `agentPreset` config, the
- * bridge enumerates `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml` at runtime
- * and refreshes on demand. Any preset the user has (life-finance,
- * life-career, life-butler, ...) becomes a WeChat mode automatically.
+ * Differentiator #1: `/modes` lists EVERY agent preset the deployment knows
+ * (authored + shipped), each annotated with the Chinese display name and
+ * description published in its `preset.yml`. Discovery goes through the
+ * service's `list()` — one capability, owned once: the bridge never re-scans
+ * directories or re-parses metadata.
  *
  * @module dsh-wechat-bridge/node/presets
  */
-export interface PresetInfo {
+import type { Context } from '@deepseek-ai/cordis';
+import { resolveDshHome } from '../home.ts';
+export { resolveDshHome };
+/** What a mode entry needs from the roster (structural — no package dep). */
+export interface ModeInfo {
     id: string;
-    dir: string;
+    name?: string;
+    description?: string;
+    order?: number;
+    broken?: string;
 }
-export declare function resolveDshHome(): string;
-export declare function resolveAgentPresetsDir(): string;
-/** Scan the agent-presets dir and return preset ids (sorted, dirs with agent.cordis.yml). */
-export declare function discoverPresets(presetsDir?: string): PresetInfo[];
-/** A tiny runtime registry with an in-memory cache. */
-export declare class PresetRegistry {
-    private cache;
-    /** List presets, refreshing the cache on each call (cheap dir scan). */
-    list(): PresetInfo[];
-    has(id: string): boolean;
-    /** Resolve the effective mode for a session: explicit id, default, or none. */
-    resolveMode(explicit?: string, defaultMode?: string): string | undefined;
+declare module '@deepseek-ai/cordis' {
+    interface Context {
+        /** Agent preset registry — presets are composed via setup, not meta alone. */
+        agentPresets: {
+            list(): Promise<Array<{
+                id: string;
+                name?: string;
+                description?: string;
+                order?: number;
+                broken?: string;
+            }>>;
+            mount(agentCtx: Context, presetId: string): Promise<unknown>;
+        };
+    }
 }
+/** All mountable modes, in roster order (order asc, then id). Broken skipped. */
+export declare function listModes(ctx: Context): Promise<ModeInfo[]>;
+/** Resolve the effective mode for a session: explicit id, default, or none. */
+export declare function resolveMode(ctx: Context, explicit?: string, defaultMode?: string): Promise<string | undefined>;
 //# sourceMappingURL=presets.d.ts.map

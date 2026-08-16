@@ -1,0 +1,88 @@
+# 移植对照表（porting notes）
+
+> 纪律（AGENTS.md A 类）：移植外部协议/实现时**逐字段、逐行为对齐官方源码**，禁止"按需裁剪"；
+> 对齐结论写进本表，升级上游时逐项 diff。上游 = [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)（MIT）。
+
+## 1. StreamingMarkdownFilter — `src/node/markdown.ts` ← `src/messaging/markdown-filter.ts`
+
+| 上游 | 本仓库 | 对齐方式 |
+|---|---|---|
+| `StreamingMarkdownFilter` 状态机（sol/fence/inl、feed/flush、pump/pumpFence/pumpSOL/pumpBody/pumpInline） | 同名类，逐方法移植 | 行为保持；仅移除上游未使用的 `FENCE_RE` 常量 |
+| 保留：代码围栏、行内代码、表格、分隔线、粗体、非 CJK 斜体/粗斜体、引用块、h1–h4 | 同 | 逐字符级一致 |
+| 剥离：CJK 斜体/粗斜体（仅去标记留内容）、h5/h6（去标记留内容）、`![alt](url)` 图片 | 同 | 逐字符级一致 |
+| 流式 chunk 不变性（one-shot = char-by-char = random chunks） | `test/markdown.test.ts` 镜像官方测试向量 | 向量共享证明行为等价 |
+| 偏差：官方在 `sendWeixinOutbound` 对全部外发文本套 filter；本插件默认 `passthrough`（实测微信端全格式渲染），filter 为可选策略 | `renderForWechat(mode)` | 有意为之，见 README「Markdown 策略」 |
+
+## 2. 工具调用进度卡片 — `src/node/outbound.ts` ← `src/messaging/reply-progress-sender.ts` + `src/api/types.ts`
+
+| 上游 | 本仓库 | 对齐方式 |
+|---|---|---|
+| `MessageItemType.TOOL_CALL_START = 11` / `TOOL_CALL_RESULT = 12` | `ITEM_TOOL_CALL_START/RESULT`（gateway/types.ts） | 常量逐字段对齐 |
+| `tool_call_start_item: { tool_name, tool_call_id }` | 同 | 字段名/语义一致 |
+| `tool_call_result_item: { tool_name, tool_call_id, status }` | 同 | `status` 归一化：completed / failed / blocked / unknown → 本仓库 error→failed，否则 completed |
+| `create_time_ms` / `is_completed` 随 item 发送 | 同 | 一致 |
+| 官方每个 tool 事件都发卡片 | 本仓库按 `progressToolPrefixes` 过滤；**默认 `[]` = 关闭**（探针+手机核对：当前后端对卡片 item 静默丢弃，200 空响应不投递），后端支持后填前缀启用 | 有意偏差：降级默认 + 限流防护，见 README |
+| 官方 `sendChain` 串行队列 | 本仓库 `Outbox`（优先级 + 合并 + 退避） | 语义超集：串行不变量保持 |
+
+## 3. typing ticket 缓存 — `src/gateway/index.ts` ← `src/api/config-cache.ts`
+
+| 上游 | 本仓库 | 对齐方式 |
+|---|---|---|
+| `CONFIG_CACHE_TTL_MS = 24h` | 同（`expiresAt`） | 一致 |
+| `CONFIG_CACHE_INITIAL_RETRY_MS = 2s`、`MAX_RETRY_MS = 1h`（指数退避） | 同（`ticketBackoffMs` 2_000→×2→上限 1h） | 一致 |
+| 每用户 `Map<user, entry>` + 24h 内随机刷新 | 单账号单票据缓存（桥只服务一个 bot） | 有意简化：语义不变 |
+| 失败后 `nextFetchAt` 内不重试 | 同（`ticketRetryAt`） | 一致 |
+
+## 4. 会话过期暂停 — `src/node/outbox.ts` ← `src/api/session-guard.ts`
+
+| 上游 | 本仓库 | 对齐方式 |
+|---|---|---|
+| `STALE_TOKEN_ERRCODE = -14` | `SESSION_EXPIRED_ERRCODE = -14` | 一致 |
+| `SESSION_PAUSE_DURATION_MS = 1h`，暂停**全部收发** API 调用 | 出站队列暂停 1h（`sessionExpiredPauseMin`，默认 60min）；轮询侧沿用网关原有 10min 退避 + 凭证重读 | 语义一致；收发两侧分别实现 |
+
+## 5. 限流错误码
+
+| 上游 | 本仓库 | 对齐方式 |
+|---|---|---|
+| 官方对发送侧 `-12` **不重试、只记日志** | `Outbox` 对 `-12` 做指数退避（10/30/60s，成功复位） | 有意增强：官方是聊天机器人通用节奏，本插件要跑长任务，必须有退避；`RATE_LIMIT_ERRCODE = -12` 常量对齐 |
+
+## 6. CDN 上传（图片/文件外发）— 已实现（P1，`src/gateway/upload.ts` + `gateway/index.ts`）
+
+上游 `src/cdn/upload.ts` + `src/cdn/aes-ecb.ts` + `src/cdn/cdn-upload.ts` + `src/cdn/cdn-url.ts`。
+全流程已逐字段对齐并端到端探针验证（getUploadUrl → CDN 上传 → FILE item → 微信端收到附件）：
+
+1. `getUploadUrl`（`GetUploadUrlReq` 全字段：filekey / media_type / to_user_id / rawsize / rawfilemd5 / filesize / no_need_thumb / aeskey）✅
+2. 本地 AES-128-ECB（PKCS7）加密明文 → 密文尺寸 = `aesEcbPaddedSize(rawsize)` ✅（与入站解密器互验往返一致）
+3. POST 密文到 `upload_full_url` / `upload_param` 拼装 URL（`Content-Type: application/octet-stream`），3 次重试、4xx 立即中止，响应头 `x-encrypted-param` ✅
+4. `sendMessage` 携带 `ImageItem.media = { encrypt_query_param, aes_key(base64), encrypt_type: 1 }` + `mid_size = 密文大小`（FILE: `file_item = { media, file_name, len }`）✅
+5. `UploadMediaType`：IMAGE=1 / VIDEO=2 / FILE=3 / VOICE=4 ✅
+6. 每类媒体单独一条消息（caption 文本先行，官方 `sendMediaItems` 语义）✅
+
+> **终局结论（2026-08-16 全证据链）**：本后端上 bot→用户外发媒体**内容取流不可用**。
+> 官方客户端自己的媒体参数是"客户端上传流程生成、双重 base64、404 字节签名结构"，
+> 服务器签发类参数（upload_param，495 字节）客户端渲染时不识别——bot 侧无法复现客户端格式，
+> 官方 openclaw-weixin / nanobot 参考实现同样不通（xep 形状可送达但取流 400）。
+> 协议保持官方客户端镜像形状（upload_param + base64(hex) key + full_url，无 encrypt_type，
+> 图片带 image_item.aeskey），**功能默认关闭**；后端为 bot 提供可取流的媒体语义后按 §6 矩阵重测即开。
+>
+> **实测偏差（2026-08-16 探针矩阵 + 官方客户端入站抓取）**：
+> 外发媒体必须**完整镜像官方客户端的外发形状**（从其入站消息捕获，逐字段一致）：
+> `media = { encrypt_query_param: <getUploadUrl 的 upload_param 长结构>, aes_key: base64(hex字符串),
+> full_url: 完整下载 URL }`，**不含 encrypt_type**；图片额外带 `image_item.aeskey`（hex）。
+> 任何单字段偏差都会失败：xep 头可送达但取流 400；upload_param 配 24 字符 key/带 encrypt_type
+> 被丢或 prepare failed。探针矩阵：
+>
+> | 变体 | 服务端 | 端上 |
+> |---|---|---|
+> | xep + aes_key=base64(hex 字符串,44 字符) | prepare failed (ret=-2) | — |
+> | xep + aes_key=base64(原始 16 字节,24 字符)（官方形状） | ack | 气泡送达，文件"无法下载"/图片"已过期" |
+> | upload_param 当引用 + 24 字符 key | ack | 消息被静默丢弃 |
+> | encrypt_type 0 | prepare failed | — |
+> | media.full_url 携带完整下载 URL | prepare failed | — |
+> | 服务器自下载 upload_param（+filekey） | 200 + 密文，解密与原文一致 | — |
+> | 服务器自下载 xep（各种拼接变体） | 400 invalid encrypted_param | — |
+>
+> 结论：**本后端对 bot 外发媒体的内容取流尚未打通**（参考实现同样无法工作）。
+> 工程决策：协议保持官方形状（xep + base64 原始字节 key + encrypt_type 1），
+> `fileThresholdChars` 默认 **0=关闭**，`/export` `/card` 保留为后端支持后立即可用。
+> 后端升级后按本矩阵重测即可开关。

@@ -24,6 +24,15 @@ export const ITEM_IMAGE = 2
 export const ITEM_VOICE = 3
 export const ITEM_FILE = 4
 export const ITEM_VIDEO = 5
+/** Bot-only progress cards rendered natively by the WeChat client. */
+export const ITEM_TOOL_CALL_START = 11
+export const ITEM_TOOL_CALL_RESULT = 12
+
+/** proto: UploadMediaType — the media_type of getUploadUrl requests. */
+export const UPLOAD_MEDIA_IMAGE = 1
+export const UPLOAD_MEDIA_VIDEO = 2
+export const UPLOAD_MEDIA_FILE = 3
+export const UPLOAD_MEDIA_VOICE = 4
 
 export const MESSAGE_TYPE_USER = 1
 export const MESSAGE_TYPE_BOT = 2
@@ -83,6 +92,19 @@ export interface VideoItem {
   thumb_media?: CdnMedia
 }
 
+/** Bot-only progress card: a tool invocation just started (client-rendered). */
+export interface ToolCallStartItem {
+  tool_name?: string
+  tool_call_id?: string
+}
+
+/** Bot-only progress card: a tool invocation finished (client-rendered). */
+export interface ToolCallResultItem {
+  tool_name?: string
+  tool_call_id?: string
+  status?: string
+}
+
 export interface MessageItem {
   type?: number
   create_time_ms?: number
@@ -95,6 +117,21 @@ export interface MessageItem {
   voice_item?: VoiceItem
   file_item?: FileItem
   video_item?: VideoItem
+  tool_call_start_item?: ToolCallStartItem
+  tool_call_result_item?: ToolCallResultItem
+}
+
+/**
+ * Outcome of one outbound send attempt. Business errcodes are surfaced so the
+ * queue can adapt (rate-limit backoff, session-expired pause) instead of
+ * treating every failure alike.
+ */
+export interface SendResult {
+  ok: boolean
+  ret?: number
+  errcode?: number
+  errmsg?: string
+  messageId?: number
 }
 
 /** Mirror the official WeixinMessage field set (Tencent/openclaw-weixin). */
@@ -142,4 +179,6 @@ export interface InboundEvent {
   message: InboundMessage
   senderId: string
   contextToken?: string
+  /** Echoed back on outbound sends — progress cards associate to it. */
+  runId?: string
 }

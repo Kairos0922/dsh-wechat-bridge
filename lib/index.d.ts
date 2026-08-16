@@ -17,6 +17,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import type { MarkdownMode } from './node/markdown.ts';
 export { WechatGateway } from './gateway/index.ts';
 export { wechatBridgeNode } from './node/index.ts';
 export * from './gateway/types.ts';
@@ -28,14 +29,28 @@ export declare const inject: string[];
 export interface Config {
     /** Hard allowlist of WeChat sender ids. REQUIRED — no permissive default. */
     allowFrom?: string[];
-    /** Heartbeat interval for progress digests (seconds; 0 disables). */
-    digestIntervalSec?: number;
     /** Approval prompt timeout before default-deny (seconds). */
     approvalTimeoutSec?: number;
     /** Max chars per WeChat bubble. */
     maxMessageChars?: number;
-    /** Throttle between outbound bubbles (ms). */
-    sendChunkDelayMs?: number;
+    /** Minimum spacing between outbound sends (rate-limit hygiene, ms). */
+    minSendIntervalMs?: number;
+    /** Escalating pause steps after errcode -12 (rate limit), seconds. */
+    rateLimitBackoffSecs?: number[];
+    /** Full outbound pause after errcode -14 (session expired), minutes. */
+    sessionExpiredPauseMin?: number;
+    /** Thinking-digest refresh interval while a turn is active (seconds). */
+    thinkingDigestSec?: number;
+    /** Numbered choice menus expire after this (seconds). */
+    menuTimeoutSec?: number;
+    /** WeChat-bound Markdown rendering policy: passthrough | filter | plain. */
+    markdownMode?: MarkdownMode;
+    /**
+     * Tool-name prefixes that get their own progress cards. Empty = disabled
+     * (default): the backend currently drops TOOL_CALL items silently (verified
+     * by send-only probes) — enable when the channel supports them.
+     */
+    progressToolPrefixes?: string[];
     /** Working directory for `/new` sessions. */
     cwd?: string;
     /** Default agent preset for sessions created without an explicit mode. */
@@ -46,6 +61,24 @@ export interface Config {
     agentModel?: string;
     /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
     mediaDir?: string;
+    /** Answers longer than this (chars) ship as a file attachment; 0 = disabled
+     *  (default — the backend cannot fetch bot media content yet, probe-verified). */
+    fileThresholdChars?: number;
+    /** Proactively announce task completion (turns ≥ notifyMinTurnSec only). */
+    notifyOnComplete?: boolean;
+    /** Minimum turn duration (sec) before completion notifications fire. */
+    notifyMinTurnSec?: number;
+    /** Delete media/export files older than this many days. */
+    mediaRetentionDays?: number;
+    /** Group chats the bridge may serve: room id → allowed senders. */
+    allowGroups?: Array<{
+        roomId: string;
+        allowFrom: string[];
+    }>;
+    /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
+    cardMode?: 'off' | 'long';
+    /** Chrome binary path for the long-card renderer (auto-detected when unset). */
+    chromePath?: string;
     /** iLink gateway base url (defaults to ilinkai.weixin.qq.com). */
     baseUrl?: string;
     /** WeChat CDN base url for media. */
@@ -55,37 +88,7 @@ export interface Config {
     /** Bot account id override (prefer credentials). */
     accountId?: string;
 }
-export declare const Config: z<Schemastery.ObjectS<{
-    allowFrom: z<string[], string[]>;
-    digestIntervalSec: z<number, number>;
-    approvalTimeoutSec: z<number, number>;
-    maxMessageChars: z<number, number>;
-    sendChunkDelayMs: z<number, number>;
-    cwd: z<string, string>;
-    defaultMode: z<string, string>;
-    agentProvider: z<string, string>;
-    agentModel: z<string, string>;
-    mediaDir: z<string, string>;
-    baseUrl: z<string, string>;
-    cdnBaseUrl: z<string, string>;
-    token: z<string, string>;
-    accountId: z<string, string>;
-}>, Schemastery.ObjectT<{
-    allowFrom: z<string[], string[]>;
-    digestIntervalSec: z<number, number>;
-    approvalTimeoutSec: z<number, number>;
-    maxMessageChars: z<number, number>;
-    sendChunkDelayMs: z<number, number>;
-    cwd: z<string, string>;
-    defaultMode: z<string, string>;
-    agentProvider: z<string, string>;
-    agentModel: z<string, string>;
-    mediaDir: z<string, string>;
-    baseUrl: z<string, string>;
-    cdnBaseUrl: z<string, string>;
-    token: z<string, string>;
-    accountId: z<string, string>;
-}>>;
+export declare const Config: z<Config>;
 /**
  * Mount both plugins. The gateway starts polling only when credentials are
  * present (resolved from the `credentials` service at startup).
