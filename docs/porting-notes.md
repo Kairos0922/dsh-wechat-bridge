@@ -101,10 +101,18 @@
 | E | C + item 字段但保留 mid_size | **prepare failed** | — |
 | F | C + 仅 create_time_ms/update_time_ms | **prepare failed** | — |
 | G | C + 仅 is_completed | **prepare failed** | — |
+| H | **官方源码逐字段镜像**（Tencent/openclaw-weixin `sendImageMessageWeixin`：xep + base64(原始字节) + encrypt_type:1 + mid_size，无 full_url/aeskey）+ ctx | **prepare failed** | — |
+| I | H 去掉 encrypt_type | **prepare failed** | — |
 
 - **item 级字段二分**：官方客户端入站 item 带 create_time_ms/update_time_ms/is_completed，
   但 **bot 发送带任一字段即 prepare failed**——服务器对 bot 出站媒体 item 有独立校验，
   bot 形状必须**不带**这三个字段（我们原始形状正确，勿照抄客户端入站 item 全字段）。
+- **官方源码形状今天被服务器拒绝**：按 Tencent/openclaw-weixin `sendImageMessageWeixin`
+  （v2.4.5，`src/messaging/send.ts`）逐字段镜像（xep + 24 字符 key + encrypt_type:1 +
+  mid_size），服务器直接 prepare failed——**官方参考实现自己的形状都过不了今天的服务器校验**，
+  且今晨矩阵同组合还曾 ack（"气泡送达已过期"），说明**服务器侧参数格式/校验今天仍在变化**
+  （upload_param 495B→672B、xep 404B→366B），服务器接受的形状客户端不渲染（A/B/C 静默丢弃），
+  客户端能渲染的形状服务器拒绝（H/I/D–G prepare failed）。
 - **官方客户端 item 没有 mid_size**（入站抓取验证），但保留 mid_size 不影响 ack。
 - **结构解码**：官方客户端 encrypt_query_param = base64( base64url( 404 字节二进制 ) )，
   服务器签发 upload_param = base64( base64url( 504 字节二进制 ) )——两者结构不同，

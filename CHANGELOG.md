@@ -29,7 +29,9 @@
   长任务完成后主动发完成摘要。存储 token 主动发送已探针 ack，端上可见性待实测。
 - **媒体留存清理（P1）**：`mediaRetentionDays`（默认 30）每日清理媒体/导出文件。
 - **群聊支持（P2）**：`allowGroups: [{roomId, allowFrom}]` room 级两层白名单；群内静默
-  （无心跳/typing/进度卡片，只回命令结果与最终答复）；每 room 一个活跃会话。需群内实测。
+  （无心跳/typing/进度卡片，只回命令结果与最终答复）；每 room 一个活跃会话。
+  **实测判定（2026-08-16）**：iLink 机器人身份无法被拉入普通微信群（腾讯侧限制，
+  官方参考实现 group_id 未实现、同协议项目文档同样标注），配置保持就绪待群事件投递开放。
 - **长图骨架（P2）**：`cardMode: 'off'|'long'`（默认 off）+ `/card` 命令——Markdown→HTML→
   Chrome headless 两段式截图→IMAGE 发送；Chrome 路径自动探测（可配 `chromePath`）。
 - **多好友绑定**：会话按 peer 绑定（持久化），回复/审批路由到会话所属 peer；context token 按 peer 保存。

@@ -115,15 +115,16 @@ function parseArgs(argv) {
     else if (a === '--fields') args.fields = (argv[++i] || '').split(',').filter(Boolean)
     else if (a === '--ctx') args.contextToken = argv[++i]
     else if (a === '--no-mid-size') args.noMidSize = true
+    else if (a === '--encrypt-type') { const v = argv[++i]; args.encryptType = v === 'null' ? null : Number(v) }
   }
-  if (args.shape !== 'current' && args.shape !== 'official') {
-    throw new Error(`unknown --shape '${args.shape}' (current|official)`)
+  if (!['current', 'official', 'official-exact'].includes(args.shape)) {
+    throw new Error(`unknown --shape '${args.shape}' (current|official|official-exact)`)
   }
   return args
 }
 
 /** Build the ImageItem — shape A via the production assembler, shape B manually (official capture). */
-function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, filesize, itemFields, fields, noMidSize }) {
+function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, filesize, itemFields, fields, noMidSize, encryptType }) {
   let item
   if (shape === 'current') {
     item = buildOutboundMediaItem({
@@ -134,7 +135,7 @@ function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, 
       rawsize,
       fileName: 'probe.png',
     })
-  } else {
+  } else if (shape === 'official') {
     // official-client shape (2026-08-16 入站抓取): xep 当引用 + base64(原始字节) key
     const media = {
       encrypt_query_param: xep,
@@ -142,8 +143,21 @@ function buildImageItem({ shape, uploadParam, xep, aeskey, cdnBaseUrl, rawsize, 
       full_url: `${cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(xep)}`,
     }
     item = { type: ITEM_IMAGE, image_item: { aeskey: aeskey.toString('hex'), media, mid_size: filesize } }
+  } else {
+    // official-exact: Tencent/openclaw-weixin sendImageMessageWeixin 逐字段镜像
+    // (src/messaging/send.ts + src/cdn/upload.ts, v2.4.5):
+    //   media = { encrypt_query_param: <CDN 上传响应 x-encrypted-param>,
+    //             aes_key: base64(原始16字节, 24字符), encrypt_type: 1 }
+    //   image_item = { media, mid_size: 密文尺寸 }
+    // 无 full_url、无 image_item.aeskey、无 item 级字段
+    const media = {
+      encrypt_query_param: xep,
+      aes_key: aeskey.toString('base64'),
+      ...(encryptType !== null ? { encrypt_type: encryptType } : {}),
+    }
+    item = { type: ITEM_IMAGE, image_item: { media, mid_size: filesize } }
   }
-  const f = itemFields ? ['ct', 'ut', 'ic'] : fields
+  const f = itemFields ? ['ct', 'ut', 'ic'] : (fields || [])
   if (f.includes('ct')) item.create_time_ms = Date.now()
   if (f.includes('ut')) item.update_time_ms = Date.now()
   if (f.includes('ic')) item.is_completed = true
@@ -214,6 +228,7 @@ async function main() {
     itemFields: args.itemFields,
     fields: args.fields,
     noMidSize: args.noMidSize,
+    encryptType: args.encryptType,
   })
   console.log('③ item 形状 →', JSON.stringify({ type: item.type, media: item.image_item?.media, mid_size: item.image_item?.mid_size, aeskey: item.image_item?.aeskey }))
   if (args.dry) {
