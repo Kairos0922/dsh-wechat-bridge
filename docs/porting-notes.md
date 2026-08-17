@@ -1,6 +1,10 @@
-# 移植对照表（porting notes）
+# 移植对照表（porting notes）——维护者内部
 
-> 纪律（AGENTS.md A 类）：移植外部协议/实现时**逐字段、逐行为对齐官方源码**，禁止"按需裁剪"；
+> ⚠️ **本文是维护者内部文档**：上游逐字段移植对照、探针矩阵与过程考古，面向协议
+> 维护与升级 diff。**协议的正向规格见 [protocol.md](protocol.md)**（常量/结构/流程/
+> 错误码，权威定义）；产品文档见 [README](../README.md)。
+>
+> 纪律：移植外部协议/实现时**逐字段、逐行为对齐官方源码**，禁止"按需裁剪"；
 > 对齐结论写进本表，升级上游时逐项 diff。上游 = [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)（MIT）。
 
 ## 1. StreamingMarkdownFilter — `src/node/markdown.ts` ← `src/messaging/markdown-filter.ts`

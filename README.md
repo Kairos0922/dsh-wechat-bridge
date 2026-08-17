@@ -60,7 +60,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | bot → 微信 | 视频 | ✅ 端上验证正常播放（`/video <路径>`；item 类型必须为 `ITEM_VIDEO=5`） |
 | bot → 微信 | 语音气泡 | ❌ 腾讯客户端不渲染 bot 语音（官方参考实现实测同样不可见） |
 
-判定过程、探针矩阵与协议逐字段对照见 [docs/porting-notes.md §6](docs/porting-notes.md)。
+协议规格见 [docs/protocol.md](docs/protocol.md)；历史探针矩阵与判定过程见 [docs/porting-notes.md](docs/porting-notes.md)（维护者内部）。
 
 ## 常用配置
 
@@ -69,7 +69,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `allowFrom` | `[]` | 额外白名单（扫码即配对是主信任机制；此项用于预授权未扫码用户或收紧） |
 | `defaultMode` | — | `/new` 不带模式时的默认预设 |
 | `cwd` | — | `/new` 会话默认工作目录 |
-| `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略（渲染实测矩阵见 [docs/markdown-matrix.md](docs/markdown-matrix.md)） |
+| `markdownMode` | `passthrough` | `passthrough` / `filter` / `plain` 三种 Markdown 策略（渲染行为实测见 [docs/verification-records.md](docs/verification-records.md)） |
 | `minSendIntervalMs` | 5000 | 出站最小发送间隔（限流卫生） |
 | `typingHeartbeatSec` | 25 | 长任务期间重发「正在输入」的间隔（0=关闭） |
 | `maxMessageChars` | 2000 | 单条气泡上限 |
@@ -79,7 +79,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `notifyOnComplete` | false | 长任务完成时主动播报（仅私聊） |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件，待用） |
 
-完整配置见插件源码 `src/node/index.ts` 的 Config 与 [docs/porting-notes.md](docs/porting-notes.md)。
+完整配置见插件源码 `src/node/index.ts` 的 `Config`。
 
 ## 多用户（1:1）
 
@@ -103,9 +103,10 @@ scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 
 ## 文档
 
-- [docs/porting-notes.md](docs/porting-notes.md) — 相对 Tencent/openclaw-weixin 的逐字段移植对照表（协议对齐 diff 清单 + 媒体探针矩阵与根因定案）
-- [docs/harness-patch.md](docs/harness-patch.md) — DSH harness 补丁记录（origin 徽标，升级 DSH 后需重打）
-- [docs/markdown-matrix.md](docs/markdown-matrix.md) — Markdown 渲染实测矩阵
+- [docs/protocol.md](docs/protocol.md) — 协议规格（iLink 常量/消息结构/媒体流程/错误码，权威定义）
+- [docs/dsh-integration.md](docs/dsh-integration.md) — DSH 集成说明（origin 徽标补丁原理与自查）
+- [docs/verification-records.md](docs/verification-records.md) — 验证记录（Markdown 渲染矩阵、健壮性审计）
+- [docs/porting-notes.md](docs/porting-notes.md) — 移植对照与探针矩阵（维护者内部）
 - [CHANGELOG.md](CHANGELOG.md)
 
 ## 许可

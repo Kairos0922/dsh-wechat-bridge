@@ -1,8 +1,9 @@
-# Harness 补丁记录（origin='wechat' 结构化徽标）
+# DSH 集成说明（origin 徽标补丁）
 
-> 位置：`~/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/`（DSH 部署 checkout）。
-> profile 的 `node_modules/@deepseek-ai/*` 是符号链接指向这里，补丁直接生效。
-> **升级 DSH 会覆盖这些文件**——升级后按下表逐项重新打补丁（每项都极小，纯加法）。
+> 把本桥装进 DSH 后，会话来源徽标（🟢 来自微信）依赖对 DSH 部署依赖的小补丁。
+> 本说明讲清**原理、打补丁位置与自查方法**；补丁位置按你的 DSH 部署方式而定
+> （npm 全局安装时在 `node_modules/@deepseek-ai/<pkg>/lib/`，即本文示例位置）。
+> **升级 DSH 或重装依赖会覆盖这些文件**——重装后按下表逐项重打（每项极小，纯加法）。
 
 ## 补丁清单（P2，2026-08-15）
 
