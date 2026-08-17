@@ -45,7 +45,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `/export` | 导出当前会话全文为 .md 附件 |
 | `/card` | 把最近一条回复渲染成长图（需 `cardMode: long` + 本机 Chrome） |
 | `/retry` `/stop` `/close` | 重试 / 停止 / 归档会话 |
-| `/thinking on|off` | 思考心跳是否附最近原文（per-user） |
+| `/thinking on\|off` | 思考心跳是否附最近原文（per-user） |
 | `/yes` `/no` | 审批（只回答你自己的待审批请求；也支持回复编号） |
 | `/help [命令]` | 帮助 |
 | `//开头` | 转义：原样把 `/` 开头的文本当普通消息发给 agent |
