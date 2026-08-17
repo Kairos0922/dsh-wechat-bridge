@@ -42,6 +42,7 @@ import {
   SESSION_EXPIRED_ERRCODE,
   UPLOAD_MEDIA_FILE,
   UPLOAD_MEDIA_IMAGE,
+  UPLOAD_MEDIA_VIDEO,
   WEIXIN_CDN_BASE_URL,
   type ImageItem,
   type InboundEvent,
@@ -672,6 +673,17 @@ export class WechatGateway extends Service {
     creds?: WechatCredentials
   }): Promise<SendResult> {
     return this.uploadAndSendMedia({ ...params, mediaType: UPLOAD_MEDIA_FILE })
+  }
+
+  /** Send a local video as a WeChat video message (type=5, verified 2026-08-17). */
+  async sendVideo(params: {
+    toUserId: string
+    filePath: string
+    contextToken?: string
+    runId?: string
+    creds?: WechatCredentials
+  }): Promise<SendResult> {
+    return this.uploadAndSendMedia({ ...params, fileName: path.basename(params.filePath), mediaType: UPLOAD_MEDIA_VIDEO })
   }
 
   /** Send a local image as a WeChat image message (long-card pipeline). */

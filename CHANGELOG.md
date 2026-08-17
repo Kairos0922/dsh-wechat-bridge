@@ -7,6 +7,10 @@
 
 ### 新增
 
+- **视频外发打通（2026-08-17 晚间）**：根因 = 类型号错误（此前把 VIDEO 写成 type:3
+  实为 VOICE，语音通道"API 接受但客户端静默丢弃"）；修正为 ITEM_VIDEO=5 后 openclaw
+  精简形状单发即端上正常显示。`buildOutboundMediaItem` 加 VIDEO 分支，新增
+  `/video <路径>` 命令。教训：发送常量必须用本地库 ITEM_*/UPLOAD_MEDIA_*，禁止手写数字。
 - **bot → 微信 媒体外发打通（终局，2026-08-17）**：官方形状
   （`xep + aes_key=base64(hex)44字符 + encrypt_type:1 + mid_size`）端上验证成功，
   手机正常显示图片。生产 `buildOutboundMediaItem` 已改为官方形状；`/export`、`/card`、

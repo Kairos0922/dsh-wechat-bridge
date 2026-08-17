@@ -14,7 +14,9 @@ import crypto from 'node:crypto'
 import {
   ITEM_FILE,
   ITEM_IMAGE,
+  ITEM_VIDEO,
   UPLOAD_MEDIA_IMAGE,
+  UPLOAD_MEDIA_VIDEO,
   type MessageItem,
 } from './types.ts'
 
@@ -154,7 +156,14 @@ export function buildOutboundMediaItem(params: {
     aes_key: encodeMediaAesKey(params.aeskey),
     encrypt_type: 1,
   }
-  return params.mediaType === UPLOAD_MEDIA_IMAGE
-    ? { type: ITEM_IMAGE, image_item: { media, mid_size: aesEcbPaddedSize(params.rawsize) } }
-    : { type: ITEM_FILE, file_item: { media, file_name: params.fileName, len: String(params.rawsize) } }
+  if (params.mediaType === UPLOAD_MEDIA_IMAGE) {
+    return { type: ITEM_IMAGE, image_item: { media, mid_size: aesEcbPaddedSize(params.rawsize) } }
+  }
+  if (params.mediaType === UPLOAD_MEDIA_VIDEO) {
+    // Verified end-to-end 2026-08-17: type MUST be ITEM_VIDEO=5 (3 is VOICE —
+    // the voice channel is server-accepted but client-silently-dropped).
+    // Official openclaw shape: media + video_size only, no thumb required.
+    return { type: ITEM_VIDEO, video_item: { media, video_size: aesEcbPaddedSize(params.rawsize) } }
+  }
+  return { type: ITEM_FILE, file_item: { media, file_name: params.fileName, len: String(params.rawsize) } }
 }

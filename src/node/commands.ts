@@ -15,6 +15,9 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { WechatBridgeNode } from './core.ts'
 import { listModes, type ModeInfo } from './presets.ts'
 import { sendTextToPeer, textOfAssistantMessage } from './outbound.ts'
+import fs from 'node:fs'
+import path from 'node:path'
+
 import { buildTranscript, exportsDir, writeExportFile } from './exports.ts'
 import { renderCardToPng } from './card.ts'
 
@@ -463,6 +466,26 @@ COMMANDS.push(
       } else {
         await sendTextToPeer(node, peerId, `当前: ${node.state.getPrefs(peerId).thinking ? '开启' : '关闭'}。用法: /thinking on|off`, { kind: 'system' })
       }
+    },
+  },
+  {
+    id: 'video',
+    summary: '发送本地视频文件（.mp4）',
+    usage: '/video <本地路径>',
+    detail: '把工作区里的视频文件作为微信视频消息发送（需要本机可访问的绝对或相对路径）。',
+    run: async (node, peerId, args) => {
+      const target = args[0]
+      if (!target) {
+        await sendTextToPeer(node, peerId, '❌ 用法: /video <本地路径>', { kind: 'system' })
+        return
+      }
+      const resolved = path.isAbsolute(target) ? target : path.join(node.resolved.cwd ?? process.cwd(), target)
+      if (!fs.existsSync(resolved)) {
+        await sendTextToPeer(node, peerId, `❌ 文件不存在: ${resolved}`, { kind: 'system' })
+        return
+      }
+      await sendTextToPeer(node, peerId, `🎬 正在发送视频 ${path.basename(resolved)}…`, { kind: 'system' })
+      node.enqueueMedia(peerId, 'video', resolved, path.basename(resolved))
     },
   },
   {

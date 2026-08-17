@@ -167,5 +167,14 @@ encrypt_type:1 + mid_size / file_item{file_name,len}），`src/gateway/index.ts`
 用 `uploadBufferToCdn` 的 `downloadParam`。`/export`、`/card`、长文转文件（fileThresholdChars>0）
 全部走此形状，立即可用。
 
-**残余问题**：视频（video_item 需 play_length/video_md5）与语音（voice_item 需
-encode_type/sample_rate 等）未端上验证；`taskid` 生成规则未逆向（客户端侧逻辑，bot 不需要）。
+**视频打通（2026-08-17 晚间追加）**：此前视频三次 ack 不显示的根因是**类型号错误**——
+本地探针与临时脚本把 VIDEO 写成 `type: 3`（实为 VOICE；openclaw 常量 IMAGE=2/VOICE=3/
+FILE=4/VIDEO=5），等于把视频当语音发（语音正是官方实测"API 接受但客户端静默不可见"
+的类型）。修正为 `type: 5` 后，openclaw 精简形状（media + video_size，无需 thumb/
+play_length/video_md5）单发即端上正常显示。生产 `buildOutboundMediaItem` 已加 VIDEO
+分支（ITEM_VIDEO=5），`/video <路径>` 命令可用。教训：发送常量必须用本地库
+`ITEM_*`/`UPLOAD_MEDIA_*`，禁止手写数字。
+
+**残余问题**：语音（voice_item，encode_type/sample_rate 等）仍受限——openclaw 官方
+实测客户端不渲染 bot 语音气泡（#215），且官方无 VOICE 出站实现；`taskid` 生成规则
+未逆向（客户端侧逻辑，bot 不需要）。

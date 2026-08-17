@@ -240,10 +240,13 @@ export class WechatBridgeNode {
       if (entry.item === undefined) return { ok: false, errmsg: 'missing item' }
       return this.ctx.wechat.sendItem({ toUserId: target, contextToken: token, runId, item: entry.item })
     }
-    if (entry.kind === 'file' || entry.kind === 'image') {
+    if (entry.kind === 'file' || entry.kind === 'image' || entry.kind === 'video') {
       if (entry.media === undefined) return { ok: false, errmsg: 'missing media' }
       if (entry.kind === 'image') {
         return this.ctx.wechat.sendImage({ toUserId: target, filePath: entry.media.filePath, contextToken: token, runId })
+      }
+      if (entry.kind === 'video') {
+        return this.ctx.wechat.sendVideo({ toUserId: target, filePath: entry.media.filePath, contextToken: token, runId })
       }
       const result = await this.ctx.wechat.sendFile({
         toUserId: target,
@@ -292,8 +295,8 @@ export class WechatBridgeNode {
     })
   }
 
-  /** Enqueue a local file/image artifact for CDN upload + send. */
-  enqueueMedia(peerId: string, kind: 'file' | 'image', filePath: string, fileName: string, fallbackText?: string): void {
+  /** Enqueue a local file/image/video artifact for CDN upload + send. */
+  enqueueMedia(peerId: string, kind: 'file' | 'image' | 'video', filePath: string, fileName: string, fallbackText?: string): void {
     this.outbox.enqueue({
       kind,
       priority: OUTBOX_PRIORITY.text,

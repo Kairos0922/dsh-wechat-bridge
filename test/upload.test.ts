@@ -8,7 +8,7 @@ import test from 'node:test'
 import { aesEcbPaddedSize, buildCdnUploadUrl, buildOutboundMediaItem, encodeMediaAesKey, encryptAesEcb, md5Hex, randomHex } from '../src/gateway/upload.ts'
 import { selectExpiredFiles } from '../src/node/retention.ts'
 import { decryptAesEcb } from '../src/gateway/media.ts'
-import { ITEM_FILE, ITEM_IMAGE, UPLOAD_MEDIA_FILE, UPLOAD_MEDIA_IMAGE } from '../src/gateway/types.ts'
+import { ITEM_FILE, ITEM_IMAGE, ITEM_VIDEO, UPLOAD_MEDIA_FILE, UPLOAD_MEDIA_IMAGE, UPLOAD_MEDIA_VIDEO } from '../src/gateway/types.ts'
 
 test('encodeMediaAesKey is base64 of the HEX STRING (official-client shape)', () => {
   const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
@@ -81,6 +81,22 @@ test('buildOutboundMediaItem (IMAGE) mirrors the official outbound shape', () =>
   assert.equal(media.full_url, undefined)
   assert.equal(item.image_item?.aeskey, undefined)
   assert.equal(item.image_item?.mid_size, aesEcbPaddedSize(100))
+})
+
+test('buildOutboundMediaItem (VIDEO) uses ITEM_VIDEO=5 (verified end-to-end 2026-08-17)', () => {
+  const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex')
+  const item = buildOutboundMediaItem({
+    mediaType: UPLOAD_MEDIA_VIDEO,
+    xep: 'x-encrypted-param-header',
+    aeskey: key,
+    rawsize: 1024,
+    fileName: 'clip.mp4',
+  })
+  assert.equal(item.type, ITEM_VIDEO)
+  assert.equal(item.type, 5, '3 is VOICE — sending video as type 3 caused silent drops')
+  assert.equal(item.video_item?.media?.encrypt_query_param, 'x-encrypted-param-header')
+  assert.equal(item.video_item?.media?.encrypt_type, 1)
+  assert.equal(item.video_item?.video_size, aesEcbPaddedSize(1024))
 })
 
 test('buildOutboundMediaItem (FILE) mirrors the official outbound shape', () => {

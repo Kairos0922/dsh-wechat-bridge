@@ -25,7 +25,7 @@ import {
   type SendResult,
 } from '../gateway/types.ts'
 
-export type OutboxEntryKind = 'system' | 'text' | 'tool-start' | 'tool-result' | 'progress' | 'file' | 'image'
+export type OutboxEntryKind = 'system' | 'text' | 'tool-start' | 'tool-result' | 'progress' | 'file' | 'image' | 'video'
 
 export interface OutboxEntry {
   kind: OutboxEntryKind
@@ -35,7 +35,7 @@ export interface OutboxEntry {
   to?: string
   text?: string
   item?: MessageItem
-  /** For kind 'file'/'image': the local artifact to upload and send. */
+  /** For kind 'file'/'image'/'video': the local artifact to upload and send. */
   media?: { filePath: string; fileName: string }
   /** Progress coalescing: a newer entry replaces a queued older one. */
   coalesceKey?: string

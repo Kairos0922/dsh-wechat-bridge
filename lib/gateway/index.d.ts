@@ -171,6 +171,14 @@ export declare class WechatGateway extends Service {
         runId?: string;
         creds?: WechatCredentials;
     }): Promise<SendResult>;
+    /** Send a local video as a WeChat video message (type=5, verified 2026-08-17). */
+    sendVideo(params: {
+        toUserId: string;
+        filePath: string;
+        contextToken?: string;
+        runId?: string;
+        creds?: WechatCredentials;
+    }): Promise<SendResult>;
     /** Send a local image as a WeChat image message (long-card pipeline). */
     sendImage(params: {
         toUserId: string;

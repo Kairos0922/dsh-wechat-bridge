@@ -127,8 +127,8 @@ export declare class WechatBridgeNode {
     }): void;
     /** Enqueue a bot progress card item (TOOL_CALL_START / TOOL_CALL_RESULT). */
     enqueueToolCard(peerId: string, kind: 'tool-start' | 'tool-result', item: MessageItem): void;
-    /** Enqueue a local file/image artifact for CDN upload + send. */
-    enqueueMedia(peerId: string, kind: 'file' | 'image', filePath: string, fileName: string, fallbackText?: string): void;
+    /** Enqueue a local file/image/video artifact for CDN upload + send. */
+    enqueueMedia(peerId: string, kind: 'file' | 'image' | 'video', filePath: string, fileName: string, fallbackText?: string): void;
     /** Whether this peer key routes to a group chat (quiet-mode rules apply). */
     isGroupPeer(peerId: string): boolean;
     /** Remember the peer's outbound target (room id for groups). */
