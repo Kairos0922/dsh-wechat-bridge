@@ -3,10 +3,16 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 发布前版本 `<1.0.0`：破坏性变更会在 Minor 版本体现。
 
-## [Unreleased] — WeChat UX 大版本
+## [0.2.0] - 2026-08-17
 
 ### 新增
 
+- **扫码即配对（多用户，2026-08-17）**：每次配对确认的微信 id 追加进持久化白名单
+  （`pairedUserIds`），后扫不顶先扫——任何人在 Web 面板扫码即自助接入，无需手动
+  配置；`isAllowed = allowFrom ∪ 全部配对者`；旧单 owner 凭证自动迁移。
+- **多用户 1:1 隔离（2026-08-17）**：模型/工作区/思考偏好改为 per-peer（旧全局单例
+  不再跨用户串扰，旧值迁移到 default 桶兜底）；孤儿会话恢复增加历史守卫——新用户
+  不会继承其他用户关闭的会话。
 - **视频外发打通（2026-08-17 晚间）**：根因 = 类型号错误（此前把 VIDEO 写成 type:3
   实为 VOICE，语音通道"API 接受但客户端静默丢弃"）；修正为 ITEM_VIDEO=5 后 openclaw
   精简形状单发即端上正常显示。`buildOutboundMediaItem` 加 VIDEO 分支，新增
@@ -20,12 +26,12 @@
   详见 docs/porting-notes.md §6.2。
 - **Markdown 渲染实测矩阵（P1）**：生产通道单发验证 h1-h4/粗体/斜体/行内代码/
   列表/引用块/表格/代码块/分隔线/链接全部正常；确认 **CJK 斜体**为已知边界
-  （中文字体无斜体，标记可能透出 → filter 模式剥离），见 docs/markdown-matrix.md。
+  （中文字体无斜体，标记可能透出 → filter 模式剥离），见 docs/verification-records.md。
 - **typing 心跳（P1）**：长任务期间按 `typingHeartbeatSec`（默认 25s，0=关闭）重发
   「正在输入」指示，避免客户端长时间无刷新后停止显示；停止/结束自动取消。
 - **命令体系手机端体检（P1）**：/help 按类别分组（会话/模型/审批/其他）便于扫读；
   命令示例去除业务化引用（改为通用示例）。
-- **通道健壮性（P1 审计，见 docs/robustness-audit.md）**：
+- **通道健壮性（P1 审计，见 docs/verification-records.md）**：
   - 出站失败分类重试：传输层失败自动重试（最多 3 次尝试，自然退避），
     服务器显式拒绝不重试——消除"网络抖动丢回复"；
   - context_token 持久化（state.json）：重启后主动推送/出站仍带会话上下文；
@@ -51,7 +57,7 @@
 - **`//` 转义**：以 `//` 开头的文本原样发给 agent（`/` 开头不再必然被当作命令）。
 - **`/help` 注册表化**：命令注册表是单一事实源，`/help` 与未知命令提示自动同步；`/help <命令>` 看详情。
 - **会话来源徽标**：微信创建的会话写入持久化 `origin: 'wechat'` 头部，DSH 侧栏渲染 🟢 徽标
-  （悬停"来自微信"；需 harness 补丁，见 `docs/harness-patch.md`）。取代早期方案——不再写
+  （悬停"来自微信"；需 harness 补丁，见 `docs/dsh-integration.md`）。取代早期方案——不再写
   `🟢 微信 ·` 标题前缀，会话标题回归干净的首句。
 - **`/modes` 精简**：每模式一行（编号+中文名+id+22 字截断说明+默认标记），整体约 370 字；
   去掉逐条 `/new` 行（微信复制整条气泡，逐行命令无选择性复制价值）。
@@ -111,7 +117,7 @@
   面板错误横幅不随成功清除（L2）；typing 票据跨用户复用（L3，改 per-user 缓存）；`/close` 不先取消运行中
   agent（L4）；暂停 sleep 未 unref（L5）；菜单编号越界即关菜单（L6，改为保留菜单）；死参数/死代码清理（L7/L8）。
 - **侧栏 🟢 徽标不显示的根因**：`dsh-client-ui-workspace` 的 `sessionNode()` 以白名单拷贝字段，
-  `origin` 未透传到行节点——已在 harness 补丁中补上（见 docs/harness-patch.md #6，与徽标渲染一并）。
+  `origin` 未透传到行节点——已在 harness 补丁中补上（见 docs/dsh-integration.md #6，与徽标渲染一并）。
 - 状态与 seen 文件 dispose 时 flush 被跳过（先置 disposed 后 flush）——已修，测试覆盖。
 - 出站队列在同步批量入队时的排序/合并竞态——泵启动改为微任务。
 
