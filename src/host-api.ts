@@ -57,7 +57,7 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
           defaultMode: node.resolved.defaultMode ?? null,
           markdownMode: node.resolved.markdownMode,
           modes: await listModes(ctx),
-          prefs: { ...node.state.prefs },
+          prefs: { ...node.state.getPrefs('default') },
           outbox: {
             pending: node.outbox.pendingCount(),
             pausedUntil: pausedUntil === null || pausedUntil <= Date.now() ? null : pausedUntil,

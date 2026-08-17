@@ -188,7 +188,7 @@ export const COMMANDS: CommandSpec[] = [
       const agent = node.activeAgent(peerId)
       const lastTurn = [...session.events].reverse().find((e) => e.type === 'turn/end')
       const reason = lastTurn ? describeTurnEnd(lastTurn.data.reason) : '尚未运行'
-      const prefs = node.state.prefs
+      const prefs = node.state.getPrefs(peerId)
       const modelLine = prefs.provider && prefs.model ? `${prefs.provider}/${prefs.model}` : '跟随 DSH 默认'
       const cwdLine = prefs.cwd ?? '跟随默认'
       const paused = node.outboxPausedUntil()
@@ -220,7 +220,7 @@ export const COMMANDS: CommandSpec[] = [
     detail: '不带参数列出供应商（回复编号进入模型列表）。/model default 恢复跟随 DSH 默认模型。显式写法例：/model deepseek/deepseek-chat。只影响之后 /new 创建的会话。',
     run: async (node, peerId, args) => {
       const llm = node.ctx.get('llm') as { listProviders(): Array<{ id: string }> } | undefined
-      const prefs = node.state.prefs
+      const prefs = node.state.getPrefs(peerId)
       const current =
         prefs.provider && prefs.model
           ? `当前: ${prefs.provider}/${prefs.model}`
@@ -250,7 +250,7 @@ export const COMMANDS: CommandSpec[] = [
         return
       }
       if (arg === 'default') {
-        node.state.setPrefs({ provider: '', model: '' })
+        node.state.setPrefs(peerId, { provider: '', model: '' })
         await sendTextToPeer(node, peerId, '✅ 已恢复跟随 DSH 默认模型（对 /new 生效）', { kind: 'system' })
         return
       }
@@ -259,7 +259,7 @@ export const COMMANDS: CommandSpec[] = [
         await sendTextToPeer(node, peerId, `❌ 用法: /model <provider>/<model>（或 /model <provider> <model>）`, { kind: 'system' })
         return
       }
-      node.state.setPrefs({ provider, model })
+      node.state.setPrefs(peerId, { provider, model })
       await sendTextToPeer(node, peerId, `✅ 模型偏好已设为 ${provider}/${model}（对 /new 新建的会话生效）`, { kind: 'system' })
     },
   },
@@ -272,7 +272,7 @@ export const COMMANDS: CommandSpec[] = [
       const registry = node.ctx.get('workspaceRegistry') as
         | { list(): Array<{ id: string; path: string; title: string }> }
         | undefined
-      const prefs = node.state.prefs
+      const prefs = node.state.getPrefs(peerId)
       const current = prefs.cwd ? `当前: ${prefs.cwd}` : '当前: 跟随默认'
       const arg = (args[0] ?? '').trim()
       if (!arg) {
@@ -299,7 +299,7 @@ export const COMMANDS: CommandSpec[] = [
         return
       }
       if (arg === 'default') {
-        node.state.setPrefs({ cwd: '' })
+        node.state.setPrefs(peerId, { cwd: '' })
         await sendTextToPeer(node, peerId, '✅ 已恢复默认工作目录（对 /new 生效）', { kind: 'system' })
         return
       }
@@ -453,13 +453,13 @@ COMMANDS.push(
     run: async (node, peerId, args) => {
       const arg = (args[0] ?? '').trim().toLowerCase()
       if (arg === 'on') {
-        node.state.setPrefs({ thinking: true })
+        node.state.setPrefs(peerId, { thinking: true })
         await sendTextToPeer(node, peerId, '✅ 已开启思考原文（心跳将附带最近思考片段）', { kind: 'system' })
       } else if (arg === 'off') {
-        node.state.setPrefs({ thinking: false })
+        node.state.setPrefs(peerId, { thinking: false })
         await sendTextToPeer(node, peerId, '✅ 已关闭思考原文（心跳只显示字数）', { kind: 'system' })
       } else {
-        await sendTextToPeer(node, peerId, `当前: ${node.state.prefs.thinking ? '开启' : '关闭'}。用法: /thinking on|off`, { kind: 'system' })
+        await sendTextToPeer(node, peerId, `当前: ${node.state.getPrefs(peerId).thinking ? '开启' : '关闭'}。用法: /thinking on|off`, { kind: 'system' })
       }
     },
   },

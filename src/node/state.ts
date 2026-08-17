@@ -29,7 +29,16 @@ export interface BridgePrefs {
 
 export interface BridgeStateData {
   version: 1
-  prefs: BridgePrefs
+  /**
+   * Per-peer preferences (provider/model/cwd/thinking). Each WeChat user's
+   * `/model` `/workspace` `/thinking` choices are isolated. The legacy
+   * single-user `prefs` field (pre-multi-user) migrates into the `default`
+   * bucket: a peer without its own prefs falls back to it, so the original
+   * owner keeps their settings after upgrade.
+   */
+  peerPrefs: Record<string, BridgePrefs>
+  /** Legacy single-user prefs — migrated into `peerPrefs['default']`. */
+  prefs?: BridgePrefs
   /** peerId → active session id. */
   peerSessions: Record<string, string>
   /** sessionId → owning peer id (survives restart for reply routing). */
@@ -53,18 +62,40 @@ export interface BridgeStateOptions {
 
 /** Validate an unknown JSON value into a usable state (never throws). */
 export function sanitizeState(value: unknown): BridgeStateData {
-  const base: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+  const base: BridgeStateData = { version: 1, peerPrefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
   if (typeof value !== 'object' || value === null) return base
   const record = value as Record<string, unknown>
-  const prefsRaw = record.prefs
-  const prefs: BridgePrefs = {}
-  if (typeof prefsRaw === 'object' && prefsRaw !== null) {
-    const p = prefsRaw as Record<string, unknown>
-    if (typeof p.provider === 'string' && p.provider) prefs.provider = p.provider
-    if (typeof p.model === 'string' && p.model) prefs.model = p.model
-    if (typeof p.cwd === 'string' && p.cwd) prefs.cwd = p.cwd
-    if (typeof p.thinking === 'boolean') prefs.thinking = p.thinking
+
+  const cleanPrefs = (raw: unknown): BridgePrefs => {
+    const prefs: BridgePrefs = {}
+    if (typeof raw === 'object' && raw !== null) {
+      const p = raw as Record<string, unknown>
+      if (typeof p.provider === 'string' && p.provider) prefs.provider = p.provider
+      if (typeof p.model === 'string' && p.model) prefs.model = p.model
+      if (typeof p.cwd === 'string' && p.cwd) prefs.cwd = p.cwd
+      if (typeof p.thinking === 'boolean') prefs.thinking = p.thinking
+    }
+    return prefs
   }
+
+  // New layout: per-peer prefs. Legacy single-user `prefs` migrates into the
+  // `default` bucket so the original owner keeps their model/workspace choices.
+  const peerPrefs: Record<string, BridgePrefs> = {}
+  const rawPeerPrefs = record.peerPrefs
+  if (typeof rawPeerPrefs === 'object' && rawPeerPrefs !== null) {
+    for (const [peer, raw] of Object.entries(rawPeerPrefs as Record<string, unknown>)) {
+      if (!peer) continue
+      const prefs = cleanPrefs(raw)
+      if (Object.keys(prefs).length > 0) peerPrefs[peer] = prefs
+    }
+  }
+  const legacy = cleanPrefs(record.prefs)
+  if (Object.keys(legacy).length > 0 && Object.keys(peerPrefs).length === 0) {
+    peerPrefs.default = legacy
+  } else if (Object.keys(legacy).length > 0 && peerPrefs.default === undefined) {
+    peerPrefs.default = legacy
+  }
+
   const peerSessions: Record<string, string> = {}
   const rawPeers = record.peerSessions
   if (typeof rawPeers === 'object' && rawPeers !== null) {
@@ -86,11 +117,11 @@ export function sanitizeState(value: unknown): BridgeStateData {
       if (typeof peer === 'string' && typeof token === 'string' && peer && token) contextTokens[peer] = token
     }
   }
-  return { version: 1, prefs, peerSessions, sessionOwners, contextTokens }
+  return { version: 1, peerPrefs, peerSessions, sessionOwners, contextTokens }
 }
 
 export class BridgeState {
-  prefs: BridgePrefs
+  private readonly peerPrefs = new Map<string, BridgePrefs>()
   private readonly file: string
   private readonly debounceMs: number
   private peerSessions = new Map<string, string>()
@@ -104,13 +135,16 @@ export class BridgeState {
   constructor(opts: BridgeStateOptions = {}) {
     this.file = opts.file ?? defaultStateFile()
     this.debounceMs = opts.debounceMs ?? 3_000
-    let loaded: BridgeStateData = { version: 1, prefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+    let loaded: BridgeStateData = { version: 1, peerPrefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
     try {
       loaded = sanitizeState(JSON.parse(fs.readFileSync(this.file, 'utf-8')) as unknown)
     } catch {
       // absent or unreadable = fresh state; never fatal
     }
-    this.prefs = loaded.prefs
+    this.peerPrefs.set('default', loaded.peerPrefs.default ?? {})
+    for (const [peer, prefs] of Object.entries(loaded.peerPrefs)) {
+      if (peer !== 'default') this.peerPrefs.set(peer, prefs)
+    }
     this.peerSessions = new Map(Object.entries(loaded.peerSessions))
     this.sessionOwners = new Map(Object.entries(loaded.sessionOwners))
     this.contextTokens = new Map(Object.entries(loaded.contextTokens))
@@ -176,37 +210,55 @@ export class BridgeState {
 
 
   /**
-   * Update prefs. An empty string DELETES the key ('' must mean "follow the
-   * default" — a stored '' would shadow the config-level fallback chain).
+   * This peer's preferences: own bucket, falling back to the migrated legacy
+   * `default` bucket so the original single-user settings keep applying.
    */
-  setPrefs(next: Partial<BridgePrefs>): void {
+  getPrefs(peerId: string): BridgePrefs {
+    return this.peerPrefs.get(peerId) ?? this.peerPrefs.get('default') ?? {}
+  }
+
+  /** Whether this peer has any history (message context or session binding). */
+  hasPeerHistory(peerId: string): boolean {
+    return this.contextTokens.has(peerId) || this.peerSessions.has(peerId)
+  }
+
+  /**
+   * Update one peer's prefs. An empty string DELETES the key ('' must mean
+   * "follow the default" — a stored '' would shadow the config-level
+   * fallback chain).
+   */
+  setPrefs(peerId: string, next: Partial<BridgePrefs>): void {
+    const current = { ...(this.peerPrefs.get(peerId) ?? {}) }
     let changed = false
     for (const key of ['provider', 'model', 'cwd'] as const) {
       const value = next[key]
       if (value === undefined) continue
       if (value === '') {
-        if (key in this.prefs) {
-          delete this.prefs[key]
+        if (key in current) {
+          delete current[key]
           changed = true
         }
         continue
       }
-      if (this.prefs[key] !== value) {
-        this.prefs[key] = value
+      if (current[key] !== value) {
+        current[key] = value
         changed = true
       }
     }
-    if (next.thinking !== undefined && this.prefs.thinking !== next.thinking) {
-      this.prefs.thinking = next.thinking
+    if (next.thinking !== undefined && current.thinking !== next.thinking) {
+      current.thinking = next.thinking
       changed = true
     }
-    if (changed) this.schedule()
+    if (!changed) return
+    if (Object.keys(current).length === 0) this.peerPrefs.delete(peerId)
+    else this.peerPrefs.set(peerId, current)
+    this.schedule()
   }
 
   toJSON(): BridgeStateData {
     return {
       version: 1,
-      prefs: { ...this.prefs },
+      peerPrefs: Object.fromEntries(this.peerPrefs),
       peerSessions: Object.fromEntries(this.peerSessions),
       sessionOwners: Object.fromEntries(this.sessionOwners),
       contextTokens: Object.fromEntries(this.contextTokens),

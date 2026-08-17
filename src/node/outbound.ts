@@ -266,7 +266,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       state.lastTickKey = key
       const parts: string[] = []
       if (state.reasoningChars > 0) {
-        const excerpt = node.state.prefs.thinking && state.lastReasoning ? `，最近: …${state.lastReasoning}` : ''
+        const excerpt = node.state.getPrefs(peer).thinking && state.lastReasoning ? `，最近: …${state.lastReasoning}` : ''
         parts.push(`🤔 思考中…（${state.reasoningChars} 字${excerpt}）`)
       } else {
         parts.push('🤔 思考中…')

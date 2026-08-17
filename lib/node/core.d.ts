@@ -186,6 +186,10 @@ export declare class WechatBridgeNode {
      * Most recent ownerless WeChat session id, for continuity migration. Live
      * sessions win; after a restart the persisted headers are consulted so the
      * binding survives even before the session is opened in the Web UI.
+     *
+     * Multi-user guard: only a peer with own history (a message context token
+     * or a prior session binding) may pick up an orphan. A brand-new user must
+     * not inherit another user's closed/released session.
      */
     private pickOrphanSession;
     nextApprovalNumber(): number;

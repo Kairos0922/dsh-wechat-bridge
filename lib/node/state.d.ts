@@ -23,7 +23,16 @@ export interface BridgePrefs {
 }
 export interface BridgeStateData {
     version: 1;
-    prefs: BridgePrefs;
+    /**
+     * Per-peer preferences (provider/model/cwd/thinking). Each WeChat user's
+     * `/model` `/workspace` `/thinking` choices are isolated. The legacy
+     * single-user `prefs` field (pre-multi-user) migrates into the `default`
+     * bucket: a peer without its own prefs falls back to it, so the original
+     * owner keeps their settings after upgrade.
+     */
+    peerPrefs: Record<string, BridgePrefs>;
+    /** Legacy single-user prefs — migrated into `peerPrefs['default']`. */
+    prefs?: BridgePrefs;
     /** peerId → active session id. */
     peerSessions: Record<string, string>;
     /** sessionId → owning peer id (survives restart for reply routing). */
@@ -43,7 +52,7 @@ export interface BridgeStateOptions {
 /** Validate an unknown JSON value into a usable state (never throws). */
 export declare function sanitizeState(value: unknown): BridgeStateData;
 export declare class BridgeState {
-    prefs: BridgePrefs;
+    private readonly peerPrefs;
     private readonly file;
     private readonly debounceMs;
     private peerSessions;
@@ -63,10 +72,18 @@ export declare class BridgeState {
     setContextToken(peerId: string, token: string | null): void;
     listContextTokens(): Array<[string, string]>;
     /**
-     * Update prefs. An empty string DELETES the key ('' must mean "follow the
-     * default" — a stored '' would shadow the config-level fallback chain).
+     * This peer's preferences: own bucket, falling back to the migrated legacy
+     * `default` bucket so the original single-user settings keep applying.
      */
-    setPrefs(next: Partial<BridgePrefs>): void;
+    getPrefs(peerId: string): BridgePrefs;
+    /** Whether this peer has any history (message context or session binding). */
+    hasPeerHistory(peerId: string): boolean;
+    /**
+     * Update one peer's prefs. An empty string DELETES the key ('' must mean
+     * "follow the default" — a stored '' would shadow the config-level
+     * fallback chain).
+     */
+    setPrefs(peerId: string, next: Partial<BridgePrefs>): void;
     toJSON(): BridgeStateData;
     private schedule;
     private flush;
