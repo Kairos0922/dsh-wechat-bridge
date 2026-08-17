@@ -143,3 +143,37 @@ test('handleText auto-creates a default session when no agent exists (zero-confi
   assert.equal(createdSessions.length, 1, 'a default session was auto-created')
   node.dispose()
 })
+
+test('natural-language stop: only intercepts while a turn is running', async () => {
+  let cancelled = 0
+  const agent = { session: { id: 'wechat-run-1' }, status: 'running', cancel: () => { cancelled += 1 }, followup: () => {} }
+  const agents = {
+    create: async () => ({ agent, dispose: async () => {} }),
+    get: () => agent,
+  }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents,
+    sessions: { get: () => ({ id: 'wechat-run-1' }) },
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', 'wechat-run-1' as never)
+  await node.handleText('a@im.wechat', '停')
+  assert.equal(cancelled, 1, 'running turn cancelled on "停"')
+  // idle: the word falls through as an ordinary message (no swallow)
+  agent.status = 'idle'
+  await node.handleText('a@im.wechat', '停')
+  assert.equal(cancelled, 1, 'idle "停" is not intercepted')
+  node.dispose()
+})
+
+test('stopTurn: friendly feedback when nothing is running', async () => {
+  const ctx = { logger: { warn() {} }, get: () => undefined, agents: {}, sessions: { get: () => undefined } }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp' } as never)
+  const sent: string[] = []
+  node.enqueueText = ((_peer: string, text: string) => { sent.push(text) }) as never
+  await node.stopTurn('a@im.wechat')
+  assert.ok(sent.some((t) => t.includes('没有执行中的任务')))
+  node.dispose()
+})

@@ -182,6 +182,14 @@ export declare class WechatBridgeNode {
     private listModels;
     /** Create a fresh agent+session for a mode (preset) and make it active. */
     createSession(peerId: string, prompt: string, mode?: string): Promise<void>;
+    /**
+     * Natural-language stop words answered ONLY while a turn is running — a
+     * WeChat user says "停" instead of typing /stop; nothing is intercepted
+     * while idle so ordinary messages never get swallowed.
+     */
+    private readonly stopWords;
+    /** Request cancellation of the peer's running turn with instant feedback. */
+    stopTurn(peerId: string): Promise<void>;
     /** Route one inbound text: menus/approvals → commands → the active agent. */
     handleText(peerId: string, text: string): Promise<void>;
     /** Resume a persisted session's agent (dsh-agent registry). */

@@ -166,15 +166,9 @@ export const COMMANDS: CommandSpec[] = [
     id: 'stop',
     summary: '停止当前任务',
     usage: '/stop',
-    detail: '请求取消当前会话正在运行的回合（不影响历史）。',
+    detail: '取消当前正在运行的回合（不影响历史）。执行中也可直接回复「停 / 停止 / 算了」。',
     run: async (node, peerId) => {
-      const agent = node.activeAgent(peerId)
-      if (!agent) {
-        await sendTextToPeer(node, peerId, '❌ 没有活动的 agent', { kind: 'system' })
-      } else {
-        agent.cancel({ kind: 'user' })
-        await sendTextToPeer(node, peerId, '⏹ 已请求停止', { kind: 'system' })
-      }
+      await node.stopTurn(peerId)
     },
   },
   {

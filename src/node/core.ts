@@ -610,6 +610,24 @@ export class WechatBridgeNode {
     }
   }
 
+  /**
+   * Natural-language stop words answered ONLY while a turn is running — a
+   * WeChat user says "停" instead of typing /stop; nothing is intercepted
+   * while idle so ordinary messages never get swallowed.
+   */
+  private readonly stopWords = new Set(['停', '停止', '算了', '别做了', '不做了'])
+
+  /** Request cancellation of the peer's running turn with instant feedback. */
+  async stopTurn(peerId: string): Promise<void> {
+    const agent = this.activeAgent(peerId)
+    if (!agent || agent.status !== 'running') {
+      await sendTextToPeer(this, peerId, '✅ 当前没有执行中的任务', { kind: 'system' })
+      return
+    }
+    agent.cancel({ kind: 'user' })
+    await sendTextToPeer(this, peerId, '⏹ 正在停止…', { kind: 'system' })
+  }
+
   /** Route one inbound text: menus/approvals → commands → the active agent. */
   async handleText(peerId: string, text: string): Promise<void> {
     debugLog({
@@ -618,6 +636,14 @@ export class WechatBridgeNode {
       isCommand: text.trim().startsWith('/'),
       text: text.slice(0, 120),
     })
+    if (this.stopWords.has(text.trim())) {
+      const agent = this.activeAgent(peerId)
+      if (agent?.status === 'running') {
+        await this.stopTurn(peerId)
+        return
+      }
+      // idle: the word is just an ordinary message — fall through
+    }
     if (this.resolveApproval(text, peerId)) return
     if (this.tryResolveMenu(peerId, text)) return
     const routed = await routeCommand(this, peerId, text)

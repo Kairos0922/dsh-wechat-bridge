@@ -44,7 +44,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `/video <路径>` | 把本机视频文件作为微信视频消息发送 |
 | `/export` | 导出当前会话全文为 .md 附件 |
 | `/card` | 把最近一条回复渲染成长图（需 `cardMode: long` + 本机 Chrome） |
-| `/retry` `/stop` `/close` | 重试 / 停止 / 归档会话 |
+| `/retry` `/stop` `/close` | 重试 / 停止 / 归档会话（执行中直接回复「停 / 停止 / 算了」也可停止） |
 | `/thinking on\|off` | 思考心跳是否附最近原文（per-user） |
 | `/yes` `/no` | 审批（只回答你自己的待审批请求；也支持回复编号） |
 | `/help [命令]` | 帮助 |

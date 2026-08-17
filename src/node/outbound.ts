@@ -265,6 +265,8 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       if (key === state.lastTickKey) return
       state.lastTickKey = key
       const parts: string[] = []
+      // First tick of the turn: surface the stop affordance once (discoverability).
+      if (state.lastTickKey === '') parts.push('（回复 /stop 可停止）')
       if (state.reasoningChars > 0) {
         const excerpt = node.state.getPrefs(peer).thinking && state.lastReasoning ? `，最近: …${state.lastReasoning}` : ''
         parts.push(`🤔 思考中…（${state.reasoningChars} 字${excerpt}）`)
@@ -409,7 +411,11 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       if (reason.kind === 'error') {
         node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system' })
       } else if (reason.kind === 'aborted') {
-        node.enqueueText(peer, '⏹ 已停止', { kind: 'system' })
+        const progress =
+          state.reasoningChars > 0 || state.toolCount > 0
+            ? `（思考 ${state.reasoningChars} 字 · ${state.toolCount} 个工具调用）`
+            : ''
+        node.enqueueText(peer, `⏹ 已停止${progress}\n回复 /retry 可重跑，或直接说新任务`, { kind: 'system' })
       } else if (reason.kind === 'max-tokens') {
         node.enqueueText(peer, '⚠️ 达到输出上限，本轮已截断（可回复“继续”让我接着完成）', { kind: 'system' })
       }
