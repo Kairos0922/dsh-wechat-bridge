@@ -14,6 +14,7 @@
  * @module dsh-wechat-bridge/node/outbound
  */
 import type { AssistantMessage } from '@deepseek-ai/dsh-llm';
+import type { Session } from '@deepseek-ai/dsh-session';
 import type { WechatBridgeNode } from './core.ts';
 /** Collapse runs of blank lines to one; strips surrounding whitespace. */
 export declare function normalizeMarkdownBlocks(content: string): string;
@@ -37,4 +38,11 @@ export declare function isProgressTool(node: WechatBridgeNode, name: string): bo
  * returned disposer.
  */
 export declare function attachSessionOutbound(node: WechatBridgeNode): () => void;
+/**
+ * Per-turn context usage line: latest reported input tokens (each step's
+ * input includes the whole history in LLM accounting, so it approximates the
+ * current context size) vs the model's disclosed context window. Returns
+ * null when no usage was reported.
+ */
+export declare function buildContextUsageLine(session: Session, node: WechatBridgeNode): Promise<string | null>;
 //# sourceMappingURL=outbound.d.ts.map

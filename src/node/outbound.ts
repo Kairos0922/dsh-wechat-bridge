@@ -400,6 +400,11 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     if (event.type === 'turn/end') {
       stopHeartbeat(state)
       if (!group) sendTyping(peer, 2)
+      // Per-turn context usage: keep the user aware of how much of the
+      // session window is consumed and when to start a fresh session.
+      void buildContextUsageLine(session, node).then((line) => {
+        if (line) node.enqueueText(peer, line, { kind: 'system' })
+      })
       const reason = event.data.reason
       if (reason.kind === 'error') {
         node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system' })
@@ -440,4 +445,48 @@ function summarizeError(error: unknown): string {
     return String((error as { message: unknown }).message).slice(0, 200)
   }
   return String(error).slice(0, 200)
+}
+
+/**
+ * Per-turn context usage line: latest reported input tokens (each step's
+ * input includes the whole history in LLM accounting, so it approximates the
+ * current context size) vs the model's disclosed context window. Returns
+ * null when no usage was reported.
+ */
+export async function buildContextUsageLine(session: Session, node: WechatBridgeNode): Promise<string | null> {
+  let input = 0
+  for (const event of [...session.events].reverse()) {
+    if (event.type === 'assistant/message' && event.data.usage) {
+      input = event.data.usage.inputTokens
+      break
+    }
+  }
+  if (input <= 0) return null
+  const kb = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+  const window = await modelContextWindow(node, node.peerOf(session.id) ?? '')
+  if (window === null) return `🧮 上下文 ≈ ${kb(input)} tokens`
+  const pct = Math.round((input / window) * 100)
+  const base = `🧮 上下文 ${kb(input)} / ${kb(window)}（${pct}%）`
+  if (pct >= 100) return `${base}——已超上限将自动压缩，建议 /new 开新会话`
+  if (pct >= 70) return `${base}——接近上限会自动压缩，建议 /new 开新会话`
+  return base
+}
+
+/** Disclosed context window (tokens) for the peer's current model, or null. */
+async function modelContextWindow(node: WechatBridgeNode, peerId: string): Promise<number | null> {
+  const llm = node.ctx.get('llm') as
+    | { listModels(provider: string): Promise<Array<{ id: string; contextWindow?: number }>> }
+    | undefined
+  if (!llm) return null
+  const fallback = (node.ctx.agentDefaultModel as { currentSelection?(): { provider?: string; model?: string } } | undefined)?.currentSelection?.() ?? {}
+  const provider = node.state.getPrefs(peerId).provider ?? node.resolved.agentProvider ?? fallback.provider
+  const model = node.state.getPrefs(peerId).model ?? node.resolved.agentModel ?? fallback.model
+  if (!provider || !model) return null
+  try {
+    const models = await llm.listModels(provider)
+    const found = models.find((m) => m.id === model)
+    return typeof found?.contextWindow === 'number' && found.contextWindow > 0 ? found.contextWindow : null
+  } catch {
+    return null
+  }
 }

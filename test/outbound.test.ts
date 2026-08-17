@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  buildContextUsageLine,
   isProgressTool,
   normalizeMarkdownBlocks,
   splitForWechat,
@@ -58,4 +59,28 @@ test('isProgressTool: non-empty list cards only matching prefixes', () => {
   assert.equal(isProgressTool(node, 'bash'), true)
   assert.equal(isProgressTool(node, 'fs-search'), true)
   assert.equal(isProgressTool(node, 'web'), false)
+})
+
+test('buildContextUsageLine: reports tokens vs window and escalates near the limit', async () => {
+  const usageEvent = (input: number) => ({ type: 'assistant/message', data: { message: {}, usage: { inputTokens: input, outputTokens: 10 } } })
+  const session = { id: 'wechat-x', events: [usageEvent(12000)] }
+  const ctx = {
+    get: () => ({
+      listModels: async () => [{ id: 'deepseek-chat', contextWindow: 32000 }],
+    }),
+    agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) },
+  }
+  const node = {
+    ctx,
+    peerOf: () => 'a@im.wechat',
+    state: { getPrefs: () => ({}) },
+    resolved: { agentProvider: 'deepseek', agentModel: 'deepseek-chat' },
+  }
+  const line = await buildContextUsageLine(session as never, node as never)
+  assert.match(line ?? '', /12.0k \/ 32.0k（38%）/)
+  const hot = await buildContextUsageLine({ id: 'wechat-y', events: [usageEvent(26000)] } as never, node as never)
+  assert.match(hot ?? '', /81%/)
+  assert.match(hot ?? '', /建议 \/new/)
+  const none = await buildContextUsageLine({ id: 'wechat-z', events: [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }] } as never, node as never)
+  assert.equal(none, null)
 })

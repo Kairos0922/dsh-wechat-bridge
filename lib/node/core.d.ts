@@ -184,6 +184,8 @@ export declare class WechatBridgeNode {
     createSession(peerId: string, prompt: string, mode?: string): Promise<void>;
     /** Route one inbound text: menus/approvals → commands → the active agent. */
     handleText(peerId: string, text: string): Promise<void>;
+    /** Resume a persisted session's agent (dsh-agent registry). */
+    private resumeSession;
     /**
      * Most recent ownerless WeChat session id, for continuity migration. Live
      * sessions win; after a restart the persisted headers are consulted so the

@@ -624,32 +624,52 @@ export class WechatBridgeNode {
     if (routed === 'handled') return
     const unescaped = routed === 'forward' ? text.replace(/^\/\//, '/') : text
     let agent = this.activeAgent(peerId)
-    if (!agent && !this.activeSession(peerId)) {
-      // No session at all: try to continue the peer's most recent WeChat
-      // session before asking for /new — a restart or re-pair must not orphan
-      // an ongoing chat.
-      const orphanId = await this.pickOrphanSession(peerId)
-      if (orphanId) {
-        this.setActiveSession(peerId, SessionId(orphanId))
-        agent = this.activeAgent(peerId)
-        if (agent) {
-          this.enqueueText(peerId, `🟢 已恢复会话 ${orphanId}，继续投递…`, { kind: 'system' })
-        } else {
+    if (!agent) {
+      // No live agent: resume the peer's bound session first; otherwise pick
+      // up their most recent ownerless WeChat session; finally — zero-config
+      // default — AUTO-CREATE a session in the default mode. A WeChat user
+      // must never be left with "no session" instructions: their message
+      // always lands in a working session.
+      let restored: string | null = null
+      const bound = this.activeSession(peerId)
+      if (bound) {
+        try {
+          await this.resumeSession(SessionId(bound.id))
+          agent = this.activeAgent(peerId)
+          restored = bound.id
+        } catch {
+          this.setActiveSession(peerId, null) // stale binding — drop it
+        }
+      }
+      if (!agent) {
+        const orphanId = await this.pickOrphanSession(peerId)
+        if (orphanId) {
+          try {
+            await this.resumeSession(SessionId(orphanId))
+            this.setActiveSession(peerId, SessionId(orphanId))
+            agent = this.activeAgent(peerId)
+            restored = orphanId
+          } catch {
+            // unreadable orphan — fall through to auto-create
+          }
+        }
+      }
+      if (agent && restored) {
+        this.enqueueText(peerId, `🟢 已恢复会话 ${restored}，继续投递…`, { kind: 'system' })
+      }
+      if (!agent) {
+        // Auto-create in the default mode and deliver the message in one go.
+        await this.createSession(peerId, unescaped, this.resolved.defaultMode)
+        const created = this.activeAgent(peerId)
+        if (!created) {
           this.enqueueText(
             peerId,
-            `🟢 已绑定会话 ${orphanId}，但它尚未在 DSH 中激活——请先在 DSH Web 打开一次该会话，或 /new 开新会话。`,
+            '💤 会话创建失败。可尝试 /new [模式] <任务> 手动创建，/modes 查看可用模式。',
             { kind: 'system' },
           )
         }
+        return
       }
-    }
-    if (!agent) {
-      this.enqueueText(
-        peerId,
-        '💤 没有活动会话。发送 /new [模式] <prompt> 开始，/modes 查看可用模式，或 /sessions 查看已有会话。',
-        { kind: 'system' },
-      )
-      return
     }
     this.rememberUserText(peerId, unescaped)
     debugLog({ event: 'followup', session: this.activeSession(peerId)?.id ?? null })
@@ -664,6 +684,11 @@ export class WechatBridgeNode {
     )
   }
 
+  /** Resume a persisted session's agent (dsh-agent registry). */
+  private async resumeSession(sessionId: SessionId): Promise<void> {
+    await this.ctx.agents.resume({ resumeSessionId: sessionId })
+  }
+
   /**
    * Most recent ownerless WeChat session id, for continuity migration. Live
    * sessions win; after a restart the persisted headers are consulted so the
@@ -675,15 +700,16 @@ export class WechatBridgeNode {
    */
   private async pickOrphanSession(peerId: string): Promise<string | null> {
     if (!this.state.hasPeerHistory(peerId)) return null
-    const live = listSessions(this).find(
-      (session) => session.id.startsWith('wechat-') && this.sessionOwners.get(session.id) === undefined,
-    )
-    if (live) return live.id
-    const persistence = this.ctx.get('sessionPersistence') as
-      | { list(): Promise<Array<{ id: string; createdAt: number }>> }
-      | undefined
-    if (!persistence) return null
+    // Best-effort recovery: any failure here falls through to auto-create.
     try {
+      const live = listSessions(this).find(
+        (session) => session.id.startsWith('wechat-') && this.sessionOwners.get(session.id) === undefined,
+      )
+      if (live) return live.id
+      const persistence = this.ctx.get('sessionPersistence') as
+        | { list(): Promise<Array<{ id: string; createdAt: number }>> }
+        | undefined
+      if (!persistence) return null
       const headers = await persistence.list()
       const candidates = headers
         .filter((header) => header.id.startsWith('wechat-') && this.sessionOwners.get(header.id) === undefined)

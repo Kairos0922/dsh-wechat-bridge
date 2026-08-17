@@ -119,3 +119,27 @@ test('buildWelcomeMessage: configured allowFrom mode', () => {
   const msg = buildWelcomeMessage({ allowFromEmpty: false })
   assert.match(msg, /白名单已按配置生效/)
 })
+
+test('handleText auto-creates a default session when no agent exists (zero-config)', async () => {
+  const createdSessions: string[] = []
+  const fakeAgent = (id: string) => ({ session: { id }, followup: () => {}, status: 'idle' })
+  const agents = {
+    create: async (opts: { sessionId: string; meta: Record<string, string> }) => {
+      createdSessions.push(opts.sessionId)
+      return { agent: fakeAgent(opts.sessionId), dispose: async () => {} }
+    },
+    resume: async () => { throw new Error('no persisted session') },
+    get: (id: string) => (createdSessions.includes(id) ? fakeAgent(id) : undefined),
+  }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents: { ...agents, get: agents.get },
+    sessions: { get: (id: string) => (createdSessions.includes(id) ? { id } : undefined) },
+    agentPresets: undefined,
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  await node.handleText('a@im.wechat', '你好')
+  assert.equal(createdSessions.length, 1, 'a default session was auto-created')
+  node.dispose()
+})
