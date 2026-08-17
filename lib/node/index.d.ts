@@ -68,6 +68,8 @@ export interface NodeConfig {
     }>;
     /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
     cardMode?: 'off' | 'long';
+    /** Origin badge opt-in (host support required; degrades automatically). */
+    originBadge?: boolean;
     /** Chrome binary path for the long-card renderer (auto-detected when unset). */
     chromePath?: string;
 }

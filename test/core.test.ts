@@ -119,3 +119,42 @@ test('buildWelcomeMessage: configured allowFrom mode', () => {
   const msg = buildWelcomeMessage({ allowFromEmpty: false })
   assert.match(msg, /白名单已按配置生效/)
 })
+
+test('createSession originBadge: host rejection degrades to plain session (never blocks)', async () => {
+  const created: Array<Record<string, string | undefined>> = []
+  const agents = {
+    create: async (opts: { meta: Record<string, string> }) => {
+      created.push({ ...opts.meta })
+      if (opts.meta.origin === 'wechat') throw new Error('session header origin must be "subagent"')
+      return { agent: { session: { id: `wechat-test-${created.length}` }, followup: () => {} }, dispose: async () => {} }
+    },
+  }
+  const ctx = { logger: { warn() {} }, get: () => undefined, agents }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, originBadge: true, allowFrom: [] } as never)
+  await node.createSession('a@im.wechat', 'hello')
+  assert.equal(created.length, 2, 'origin attempt + plain retry')
+  assert.equal(created[0]?.origin, 'wechat')
+  assert.equal(created[1]?.origin, undefined, 'retry without origin')
+  // Once degraded, subsequent sessions skip origin entirely (no repeated failures)
+  created.length = 0
+  await node.createSession('a@im.wechat', 'again')
+  assert.equal(created.length, 1)
+  assert.equal(created[0]?.origin, undefined)
+  node.dispose()
+})
+
+test('createSession originBadge off: never sends origin (zero host dependency)', async () => {
+  const created: Array<Record<string, string | undefined>> = []
+  const agents = {
+    create: async (opts: { meta: Record<string, string> }) => {
+      created.push({ ...opts.meta })
+      return { agent: { session: { id: 'wechat-plain-1' }, followup: () => {} }, dispose: async () => {} }
+    },
+  }
+  const ctx = { logger: { warn() {} }, get: () => undefined, agents }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, originBadge: false, allowFrom: [] } as never)
+  await node.createSession('a@im.wechat', 'hello')
+  assert.equal(created.length, 1)
+  assert.equal(created[0]?.origin, undefined)
+  node.dispose()
+})

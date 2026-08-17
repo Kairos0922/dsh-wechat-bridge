@@ -82,6 +82,8 @@ export interface Config {
   allowGroups?: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
   cardMode?: 'off' | 'long'
+  /** Origin badge opt-in (host support required; degrades automatically). */
+  originBadge?: boolean
   /** Chrome binary path for the long-card renderer (auto-detected when unset). */
   chromePath?: string
   /** iLink gateway base url (defaults to ilinkai.weixin.qq.com). */
@@ -116,6 +118,10 @@ export const Config: z<Config> = z.object({
   mediaRetentionDays: z.number().default(30),
   allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
   cardMode: z.union(['off', 'long']).default('off'),
+  /** Write origin='wechat' session header (🟢 sidebar badge). Requires host
+   *  support (DSH integration patch or native origin extension); on any
+   *  creation failure the bridge degrades to a plain session automatically. */
+  originBadge: z.boolean().default(false),
   chromePath: z.string(),
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
@@ -156,6 +162,7 @@ export function apply(ctx: Context, config: Config): void {
     mediaRetentionDays: config.mediaRetentionDays,
     allowGroups: config.allowGroups,
     cardMode: config.cardMode,
+    originBadge: config.originBadge,
     chromePath: config.chromePath,
   })
 }

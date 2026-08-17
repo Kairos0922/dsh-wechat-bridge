@@ -72,6 +72,8 @@ export interface ResolvedNodeConfig {
     }>;
     /** Long-image card mode: 'off' | 'long'. */
     cardMode: 'off' | 'long';
+    /** Origin badge opt-in (needs host support; degrades automatically). */
+    originBadge: boolean;
     /** Chrome binary path for the long-card renderer (auto-detected when unset). */
     chromePath?: string;
 }
@@ -182,6 +184,11 @@ export declare class WechatBridgeNode {
     private listModels;
     /** Create a fresh agent+session for a mode (preset) and make it active. */
     createSession(peerId: string, prompt: string, mode?: string): Promise<void>;
+    /** Host rejected the origin header once — stop sending it for this process. */
+    private originBadgeUnsupported;
+    private createAgent;
+    /** Whether the session log actually exists on disk (ghost-session guard). */
+    private sessionPersisted;
     /** Route one inbound text: menus/approvals → commands → the active agent. */
     handleText(peerId: string, text: string): Promise<void>;
     /**
