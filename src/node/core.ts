@@ -162,6 +162,11 @@ export class WechatBridgeNode {
 
   /** Mount the bridge: outbound digest, approval answerer, inbound gate. */
   attach(): void {
+    // Migrate the legacy single-owner credential (pre-multi-user) into the
+    // persisted paired set so the original owner stays trusted.
+    void this.pairedUserId().then((owner) => {
+      if (owner) this.state.addPairedUserId(owner)
+    })
     // Restore persisted peer bindings and owner registry.
     for (const [peerId, sessionId] of this.state.listPeerSessions()) {
       this.peerSessions.set(peerId, SessionId(sessionId))
@@ -189,6 +194,9 @@ export class WechatBridgeNode {
     this.disposers.push(
       this.ctx.on('wechat/paired', (payload: { userId: string; accountId: string | null }) => {
         if (!payload.userId) return
+        // Scan = trust: every confirmed scanner joins the trusted set. A later
+        // scan never displaces an earlier one (multi-user 1:1).
+        this.state.addPairedUserId(payload.userId)
         this.enqueueText(
           payload.userId,
           buildWelcomeMessage({ allowFromEmpty: this.resolved.allowFrom.length === 0 }),
@@ -374,11 +382,17 @@ export class WechatBridgeNode {
     return id
   }
 
-  /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ the pairer. */
+  /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ all pairing-confirmed scanners. */
   async isAllowed(senderId: string): Promise<boolean> {
     if (this.resolved.allowFrom.includes(senderId)) return true
+    if (this.state.listPairedUserIds().includes(senderId)) return true
     const owner = await this.pairedUserId()
     return owner !== null && senderId === owner
+  }
+
+  /** All pairing-confirmed trusted WeChat ids (persisted). */
+  listPairedUserIds(): string[] {
+    return this.state.listPairedUserIds()
   }
 
   /** Set (and persist) the peer's active session. */

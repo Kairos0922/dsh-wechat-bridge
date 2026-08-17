@@ -7,6 +7,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 import { buildWelcomeMessage, WechatBridgeNode } from '../src/node/core.ts'
 
 const CONFIG = {
@@ -78,6 +82,23 @@ test('isAllowed: the paired (QR-scanning) WeChat id is auto-allowlisted', async 
   assert.equal(await node.isAllowed('owner-123@im.wechat'), true)
   assert.equal(await node.isAllowed('stranger@im.wechat'), false)
   node.dispose()
+})
+
+test('isAllowed: every pairing-confirmed scanner is trusted (multi-user)', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-core-'))
+  try {
+    const ctx = { logger: { warn() {} }, get: () => undefined }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
+    node.state.addPairedUserId('scanner-a@im.wechat')
+    node.state.addPairedUserId('scanner-b@im.wechat')
+    assert.equal(await node.isAllowed('scanner-a@im.wechat'), true)
+    assert.equal(await node.isAllowed('scanner-b@im.wechat'), true)
+    assert.equal(await node.isAllowed('stranger@im.wechat'), false)
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
 })
 
 test('isAllowed: empty allowFrom and no pairing → nobody is allowed (safe default)', async () => {

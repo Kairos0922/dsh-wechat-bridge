@@ -39,6 +39,12 @@ export interface BridgeStateData {
   peerPrefs: Record<string, BridgePrefs>
   /** Legacy single-user prefs — migrated into `peerPrefs['default']`. */
   prefs?: BridgePrefs
+  /**
+   * Every WeChat id that ever confirmed a pairing QR — each scan adds its
+   * scanner (multi-user: anyone who scans becomes trusted; a later scan
+   * never displaces an earlier one). This is the "scan = trust" boundary.
+   */
+  pairedUserIds: string[]
   /** peerId → active session id. */
   peerSessions: Record<string, string>
   /** sessionId → owning peer id (survives restart for reply routing). */
@@ -62,7 +68,7 @@ export interface BridgeStateOptions {
 
 /** Validate an unknown JSON value into a usable state (never throws). */
 export function sanitizeState(value: unknown): BridgeStateData {
-  const base: BridgeStateData = { version: 1, peerPrefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+  const base: BridgeStateData = { version: 1, peerPrefs: {}, pairedUserIds: [], peerSessions: {}, sessionOwners: {}, contextTokens: {} }
   if (typeof value !== 'object' || value === null) return base
   const record = value as Record<string, unknown>
 
@@ -96,6 +102,13 @@ export function sanitizeState(value: unknown): BridgeStateData {
     peerPrefs.default = legacy
   }
 
+  const pairedUserIds: string[] = []
+  const rawPaired = record.pairedUserIds
+  if (Array.isArray(rawPaired)) {
+    for (const id of rawPaired) {
+      if (typeof id === 'string' && id && !pairedUserIds.includes(id)) pairedUserIds.push(id)
+    }
+  }
   const peerSessions: Record<string, string> = {}
   const rawPeers = record.peerSessions
   if (typeof rawPeers === 'object' && rawPeers !== null) {
@@ -117,11 +130,12 @@ export function sanitizeState(value: unknown): BridgeStateData {
       if (typeof peer === 'string' && typeof token === 'string' && peer && token) contextTokens[peer] = token
     }
   }
-  return { version: 1, peerPrefs, peerSessions, sessionOwners, contextTokens }
+  return { version: 1, peerPrefs, pairedUserIds, peerSessions, sessionOwners, contextTokens }
 }
 
 export class BridgeState {
   private readonly peerPrefs = new Map<string, BridgePrefs>()
+  private readonly pairedUserIds = new Set<string>()
   private readonly file: string
   private readonly debounceMs: number
   private peerSessions = new Map<string, string>()
@@ -135,12 +149,13 @@ export class BridgeState {
   constructor(opts: BridgeStateOptions = {}) {
     this.file = opts.file ?? defaultStateFile()
     this.debounceMs = opts.debounceMs ?? 3_000
-    let loaded: BridgeStateData = { version: 1, peerPrefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+    let loaded: BridgeStateData = { version: 1, peerPrefs: {}, pairedUserIds: [], peerSessions: {}, sessionOwners: {}, contextTokens: {} }
     try {
       loaded = sanitizeState(JSON.parse(fs.readFileSync(this.file, 'utf-8')) as unknown)
     } catch {
       // absent or unreadable = fresh state; never fatal
     }
+    for (const id of loaded.pairedUserIds) this.pairedUserIds.add(id)
     this.peerPrefs.set('default', loaded.peerPrefs.default ?? {})
     for (const [peer, prefs] of Object.entries(loaded.peerPrefs)) {
       if (peer !== 'default') this.peerPrefs.set(peer, prefs)
@@ -217,6 +232,18 @@ export class BridgeState {
     return this.peerPrefs.get(peerId) ?? this.peerPrefs.get('default') ?? {}
   }
 
+  /** Record a pairing-confirmed WeChat id (idempotent, never displaces). */
+  addPairedUserId(userId: string): void {
+    if (!userId || this.pairedUserIds.has(userId)) return
+    this.pairedUserIds.add(userId)
+    this.schedule()
+  }
+
+  /** All pairing-confirmed WeChat ids. */
+  listPairedUserIds(): string[] {
+    return [...this.pairedUserIds]
+  }
+
   /** Whether this peer has any history (message context or session binding). */
   hasPeerHistory(peerId: string): boolean {
     return this.contextTokens.has(peerId) || this.peerSessions.has(peerId)
@@ -259,6 +286,7 @@ export class BridgeState {
     return {
       version: 1,
       peerPrefs: Object.fromEntries(this.peerPrefs),
+      pairedUserIds: [...this.pairedUserIds],
       peerSessions: Object.fromEntries(this.peerSessions),
       sessionOwners: Object.fromEntries(this.sessionOwners),
       contextTokens: Object.fromEntries(this.contextTokens),

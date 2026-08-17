@@ -154,8 +154,10 @@ export declare class WechatBridgeNode {
      * effect within one TTL.
      */
     private pairedUserId;
-    /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ the pairer. */
+    /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ all pairing-confirmed scanners. */
     isAllowed(senderId: string): Promise<boolean>;
+    /** All pairing-confirmed trusted WeChat ids (persisted). */
+    listPairedUserIds(): string[];
     /** Set (and persist) the peer's active session. */
     setActiveSession(peerId: string, sessionId: SessionId | null): void;
     /** Sessions this peer owns, most-recent-first. */

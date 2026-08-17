@@ -197,14 +197,16 @@ export const COMMANDS: CommandSpec[] = [
           ? `限流暂停中（约 ${Math.round((paused - Date.now()) / 1000)}s）`
           : `正常（队列 ${node.outbox.pendingCount()} 条）`
       const usage = tokenUsageSummary(session)
-      const pairedId = await node.getPairedUserId()
+      const pairedIds = node.listPairedUserIds()
       const allowFrom = node.resolved.allowFrom
+      const pairedLine =
+        pairedIds.length > 0
+          ? `扫码配对: ${pairedIds.length} 人${pairedIds.includes(peerId) ? '（含你）' : ''}`
+          : '扫码配对: 无'
       const trustLine =
-        pairedId !== null
-          ? `配对账号: ${pairedId}${allowFrom.length > 0 ? '（allowFrom 已配置）' : '（扫码自动白名单）'}`
-          : allowFrom.length > 0
-            ? `白名单: ${allowFrom.length} 人（allowFrom 配置）`
-            : '白名单: 未配对且未配置（无人可进）'
+        allowFrom.length > 0
+          ? `${pairedLine} · allowFrom ${allowFrom.length} 人`
+          : pairedLine
       await sendTextToPeer(
         node,
         peerId,

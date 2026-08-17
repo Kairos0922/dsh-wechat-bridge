@@ -32,7 +32,7 @@ test('sanitizeState drops malformed fields and never throws', () => {
   assert.deepEqual(data.peerPrefs, {})
   assert.deepEqual(data.peerSessions, {})
   assert.deepEqual(data.sessionOwners, {})
-  assert.deepEqual(sanitizeState(null), { version: 1, peerPrefs: {}, peerSessions: {}, sessionOwners: {}, contextTokens: {} })
+  assert.deepEqual(sanitizeState(null), { version: 1, peerPrefs: {}, pairedUserIds: [], peerSessions: {}, sessionOwners: {}, contextTokens: {} })
 })
 
 test('peer bindings and prefs persist across instances', async () => {

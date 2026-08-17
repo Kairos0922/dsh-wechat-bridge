@@ -33,6 +33,12 @@ export interface BridgeStateData {
     peerPrefs: Record<string, BridgePrefs>;
     /** Legacy single-user prefs — migrated into `peerPrefs['default']`. */
     prefs?: BridgePrefs;
+    /**
+     * Every WeChat id that ever confirmed a pairing QR — each scan adds its
+     * scanner (multi-user: anyone who scans becomes trusted; a later scan
+     * never displaces an earlier one). This is the "scan = trust" boundary.
+     */
+    pairedUserIds: string[];
     /** peerId → active session id. */
     peerSessions: Record<string, string>;
     /** sessionId → owning peer id (survives restart for reply routing). */
@@ -53,6 +59,7 @@ export interface BridgeStateOptions {
 export declare function sanitizeState(value: unknown): BridgeStateData;
 export declare class BridgeState {
     private readonly peerPrefs;
+    private readonly pairedUserIds;
     private readonly file;
     private readonly debounceMs;
     private peerSessions;
@@ -76,6 +83,10 @@ export declare class BridgeState {
      * `default` bucket so the original single-user settings keep applying.
      */
     getPrefs(peerId: string): BridgePrefs;
+    /** Record a pairing-confirmed WeChat id (idempotent, never displaces). */
+    addPairedUserId(userId: string): void;
+    /** All pairing-confirmed WeChat ids. */
+    listPairedUserIds(): string[];
     /** Whether this peer has any history (message context or session binding). */
     hasPeerHistory(peerId: string): boolean;
     /**
