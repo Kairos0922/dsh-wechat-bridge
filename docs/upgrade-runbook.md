@@ -71,4 +71,4 @@ curl -s http://127.0.0.1:3080/api/dsh-wechat-bridge/status | python3 -m json.too
 - 确认 `pnpm verify` 与干跑绿后，把 `plugins/dsh-wechat-bridge/` 全部改动（src/lib/test/docs）一并提交；
   提交信息建议：`dsh-wechat-bridge: M4 移动端体验 + 限流感知出站（P0 验收通过）`。
 - P1 排期：FILE 附件通道（CDN 上传移植，见 docs/porting-notes.md §6）、`/thinking` 开关、完成主动推送。
-- P2（需 harness 窗口）：`origin='wechat'` 结构化徽标、图片长图、群聊。
+- P2（待办）：图片长图、群聊（origin 徽标方案已废弃——宿主不支持即不做，禁止补丁实现）。

@@ -75,7 +75,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `maxMessageChars` | 2000 | 单条气泡上限 |
 | `fileThresholdChars` | 0 | 长文转文件阈值（>0 时超长回复自动变 .md 附件；0=关闭） |
 | `cardMode` | `off` | 长图卡片模式（`off` / `long`，需本机 Chrome） |
-| `originBadge` | `false` | 会话来源徽标（🟢 侧栏标记）。默认关闭 = 零宿主依赖；开启需宿主支持（DSH 集成补丁或原生 origin 扩展），不支持时自动降级为普通会话 |
+
 | `approvalTimeoutSec` | 600 | 审批等待超时（超时默认拒绝） |
 | `notifyOnComplete` | false | 长任务完成时主动播报（仅私聊） |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件，待用） |
@@ -105,7 +105,6 @@ scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 ## 文档
 
 - [docs/protocol.md](docs/protocol.md) — 协议规格（iLink 常量/消息结构/媒体流程/错误码，权威定义）
-- [docs/dsh-integration.md](docs/dsh-integration.md) — DSH 集成说明（origin 徽标补丁原理与自查）
 - [docs/verification-records.md](docs/verification-records.md) — 验证记录（Markdown 渲染矩阵、健壮性审计）
 - [docs/porting-notes.md](docs/porting-notes.md) — 移植对照与探针矩阵（维护者内部）
 - [CHANGELOG.md](CHANGELOG.md)
