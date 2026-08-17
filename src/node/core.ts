@@ -23,6 +23,7 @@ import { attachApprovalBridge, type PendingApproval } from './approvals.ts'
 import { listSessions, routeCommand } from './commands.ts'
 import { handleInbound } from './inbound.ts'
 import { attachSessionOutbound, sendTextToPeer, splitForWechat } from './outbound.ts'
+import { listModes } from './presets.ts'
 import { attachMediaRetention } from './retention.ts'
 import { resolveMode } from './presets.ts'
 import { debugLog } from '../debug-log.ts'
@@ -77,6 +78,8 @@ export interface ResolvedNodeConfig {
   allowGroups: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long'. */
   cardMode: 'off' | 'long'
+  /** Notify trusted users when a non-allowlisted sender attempts contact. */
+  notifyRejected: boolean
   /** Chrome binary path for the long-card renderer (auto-detected when unset). */
   chromePath?: string
 }
@@ -87,15 +90,20 @@ export function newSessionId(): SessionId {
 }
 
 /** First-run welcome message sent to the pairer right after QR confirmation. */
-export function buildWelcomeMessage(opts: { allowFromEmpty: boolean }): string {
+export function buildWelcomeMessage(opts: { allowFromEmpty: boolean; defaultModeName: string | null }): string {
   const trust = opts.allowFromEmpty
     ? '🔓 你已通过扫码自动获得白名单，可直接使用。'
     : '🔒 白名单已按配置生效，可直接使用。'
+  const defaultLine =
+    opts.defaultModeName !== null
+      ? `· 直接发消息将使用默认模式：${opts.defaultModeName}（/modes 可切换）`
+      : '· 直接发消息将使用 DSH 默认角色（/modes 可切换）'
   return [
     '✅ 微信桥配对成功，欢迎使用！',
     trust,
     '',
     '快速上手：',
+    defaultLine,
     '· 发送 /modes 查看全部可用模式（回复编号直接开会话）',
     '· 发送 /new <模式> <任务> 指定模式开会话',
     '· /status 查看会话与通道状态 · /help 查看全部命令',
@@ -157,6 +165,15 @@ export class WechatBridgeNode {
       backoffSecs: config.rateLimitBackoffSecs,
       sessionExpiredPauseMs: config.sessionExpiredPauseMin * 60_000,
       send: (entry) => this.dispatchOutboxEntry(entry),
+      // Media that exhausted its retry budget must not fail silently — the
+      // user asked for a picture/video and gets a straight answer instead of
+      // a mystery. (File entries already degrade to text via dispatch.)
+      onDrop: (entry, reason, result) => {
+        if (reason !== 'failed' || !entry.media || entry.kind === 'file') return
+        const label = entry.kind === 'image' ? '图片' : entry.kind === 'video' ? '视频' : '文件'
+        const err = result?.errmsg ? `：${result.errmsg.slice(0, 120)}` : ''
+        this.enqueueText(entry.to ?? '', `❌ ${label}发送失败${err}`, { kind: 'system' })
+      },
     })
   }
 
@@ -189,6 +206,16 @@ export class WechatBridgeNode {
         void handleInbound(this, payload)
       }),
     )
+    // Back-online notice: after consecutive poll failures the gateway emits
+    // once on recovery; every trusted peer gets a one-line status ping.
+    this.disposers.push(
+      this.ctx.on('wechat/back-online', () => {
+        const targets = new Set<string>([...this.resolved.allowFrom, ...this.state.listPairedUserIds()])
+        for (const peer of targets) {
+          this.enqueueText(peer, '✅ 已恢复在线', { kind: 'system' })
+        }
+      }),
+    )
     // First-run experience: a freshly confirmed pairing pushes a welcome
     // message straight into the pairer's chat — zero-config onboarding.
     this.disposers.push(
@@ -197,11 +224,16 @@ export class WechatBridgeNode {
         // Scan = trust: every confirmed scanner joins the trusted set. A later
         // scan never displaces an earlier one (multi-user 1:1).
         this.state.addPairedUserId(payload.userId)
-        this.enqueueText(
-          payload.userId,
-          buildWelcomeMessage({ allowFromEmpty: this.resolved.allowFrom.length === 0 }),
-          { kind: 'system' },
-        )
+        void this.modeDisplayName(this.resolved.defaultMode ?? '').then((name) => {
+          this.enqueueText(
+            payload.userId,
+            buildWelcomeMessage({
+              allowFromEmpty: this.resolved.allowFrom.length === 0,
+              defaultModeName: this.resolved.defaultMode ? name : null,
+            }),
+            { kind: 'system' },
+          )
+        })
       }),
     )
     // Migration: sessions created before per-peer binding (id prefix `wechat-`,
@@ -598,11 +630,11 @@ export class WechatBridgeNode {
           }),
         )
       }
-      const modeLabel = preset ? ` · 模式 ${preset}` : ''
+      const modeLabel = preset ? ` · 模式 ${await this.modeDisplayName(preset)}` : ''
       const modelLabel = provider || model ? ` · ${provider ?? '默认'}/${model ?? '默认'}` : ''
       this.enqueueText(
         peerId,
-        `✅ 已创建新会话 ${session.id}${modeLabel}${modelLabel}${prompt ? '，开始处理…' : ''}`,
+        `✅ 已创建新会话${modeLabel || '（默认角色）'}${modelLabel}${prompt ? '，开始处理…' : ''}`,
         { kind: 'system' },
       )
     } catch (error) {
@@ -681,7 +713,7 @@ export class WechatBridgeNode {
         }
       }
       if (agent && restored) {
-        this.enqueueText(peerId, `🟢 已恢复会话 ${restored}，继续投递…`, { kind: 'system' })
+        this.enqueueText(peerId, '🟢 已恢复你上次的会话，继续投递…', { kind: 'system' })
       }
       if (!agent) {
         // Auto-create in the default mode and deliver the message in one go.
@@ -713,6 +745,16 @@ export class WechatBridgeNode {
   /** Resume a persisted session's agent (dsh-agent registry). */
   private async resumeSession(sessionId: SessionId): Promise<void> {
     await this.ctx.agents.resume({ resumeSessionId: sessionId })
+  }
+
+  /** User-facing mode name (falls back to the id when no display name). */
+  private async modeDisplayName(modeId: string): Promise<string> {
+    try {
+      const modes = await listModes(this.ctx)
+      return modes.find((m) => m.id === modeId)?.name || modeId
+    } catch {
+      return modeId
+    }
   }
 
   /**

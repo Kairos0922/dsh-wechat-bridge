@@ -157,6 +157,14 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
         '[dsh-wechat-bridge] ignoring message from non-allowlisted sender %s (never fed to the model)',
         senderId,
       )
+      // Optional transparency: tell trusted users a stranger tried to reach
+      // the bot (off by default — can be noisy under spam).
+      if (node.resolved.notifyRejected) {
+        const targets = new Set<string>([...node.resolved.allowFrom, ...node.state.listPairedUserIds()])
+        for (const peer of targets) {
+          node.enqueueText(peer, '👤 陌生账号尝试联系（已忽略，未进入任何会话）', { kind: 'system' })
+        }
+      }
       return
     }
   }

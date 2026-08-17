@@ -114,6 +114,8 @@ declare module '@deepseek-ai/cordis' {
     'wechat/status'(status: GatewayStatus): void
     /** A QR pairing was confirmed — the pairer's WeChat id is the trust anchor. */
     'wechat/paired'(payload: { userId: string; accountId: string | null }): void
+    /** The long-poll recovered after consecutive failures. */
+    'wechat/back-online'(): void
   }
 }
 
@@ -381,7 +383,14 @@ export class WechatGateway extends Service {
             getUpdatesBuf: buf,
             abortSignal: this.pollAbort.signal,
           })
+          const wasDown = failures > 0
           failures = 0
+          if (wasDown) {
+            // Back online after consecutive failures — tell the peers (the
+            // bridge node broadcasts to trusted senders).
+            this.ctx.emit('wechat/back-online')
+            debugLog({ event: 'poll-recovered' })
+          }
           const errcode = batch.errcode
           if (errcode === SESSION_EXPIRED_ERRCODE || (errcode === -2 && /unknown error/i.test(batch.errmsg ?? ''))) {
             // -14 / -2+unknown: session expiry — re-resolve credentials so a

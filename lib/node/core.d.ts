@@ -72,6 +72,8 @@ export interface ResolvedNodeConfig {
     }>;
     /** Long-image card mode: 'off' | 'long'. */
     cardMode: 'off' | 'long';
+    /** Notify trusted users when a non-allowlisted sender attempts contact. */
+    notifyRejected: boolean;
     /** Chrome binary path for the long-card renderer (auto-detected when unset). */
     chromePath?: string;
 }
@@ -80,6 +82,7 @@ export declare function newSessionId(): SessionId;
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export declare function buildWelcomeMessage(opts: {
     allowFromEmpty: boolean;
+    defaultModeName: string | null;
 }): string;
 /** One numbered choice menu pending for a peer. */
 export interface PendingMenu {
@@ -194,6 +197,8 @@ export declare class WechatBridgeNode {
     handleText(peerId: string, text: string): Promise<void>;
     /** Resume a persisted session's agent (dsh-agent registry). */
     private resumeSession;
+    /** User-facing mode name (falls back to the id when no display name). */
+    private modeDisplayName;
     /**
      * Most recent ownerless WeChat session id, for continuity migration. Live
      * sessions win; after a restart the persisted headers are consulted so the

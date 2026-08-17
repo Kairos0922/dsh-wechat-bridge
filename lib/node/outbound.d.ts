@@ -44,5 +44,7 @@ export declare function attachSessionOutbound(node: WechatBridgeNode): () => voi
  * current context size) vs the model's disclosed context window. Returns
  * null when no usage was reported.
  */
+/** Latest reported input tokens ≈ current context size (or 0). */
+export declare function latestContextInput(session: Session): number;
 export declare function buildContextUsageLine(session: Session, node: WechatBridgeNode): Promise<string | null>;
 //# sourceMappingURL=outbound.d.ts.map

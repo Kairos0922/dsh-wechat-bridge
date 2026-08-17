@@ -57,7 +57,7 @@ export interface OutboxOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
-  onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed') => void
+  onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void
 }
 
 export class Outbox {
@@ -229,7 +229,7 @@ export class Outbox {
       return true
     }
     this.backoffIdx = 0
-    this.onDrop?.(entry, 'failed')
+    this.onDrop?.(entry, 'failed', result)
     return false
   }
 }

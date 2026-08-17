@@ -71,6 +71,8 @@ declare module '@deepseek-ai/cordis' {
             userId: string;
             accountId: string | null;
         }): void;
+        /** The long-poll recovered after consecutive failures. */
+        'wechat/back-online'(): void;
     }
 }
 export declare class WechatGateway extends Service {

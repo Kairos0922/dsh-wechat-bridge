@@ -54,7 +54,7 @@ export interface OutboxOptions {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void;
-    onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed') => void;
+    onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void;
 }
 export declare class Outbox {
     private readonly opts;

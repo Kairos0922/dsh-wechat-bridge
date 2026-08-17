@@ -46,6 +46,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `/card` | 把最近一条回复渲染成长图（需 `cardMode: long` + 本机 Chrome） |
 | `/retry` `/stop` `/close` | 重试 / 停止 / 归档会话（执行中直接回复「停 / 停止 / 算了」也可停止） |
 | `/thinking on\|off` | 思考心跳是否附最近原文（per-user） |
+| `/sessions` | 列出你的会话（含上下文用量与最后活动时间），`/use N` 切换 |
 | `/yes` `/no` | 审批（只回答你自己的待审批请求；也支持回复编号） |
 | `/help [命令]` | 帮助 |
 | `//开头` | 转义：原样把 `/` 开头的文本当普通消息发给 agent |
@@ -78,6 +79,8 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 
 | `approvalTimeoutSec` | 600 | 审批等待超时（超时默认拒绝） |
 | `notifyOnComplete` | false | 长任务完成时主动播报（仅私聊） |
+| `notifyRejected` | false | 陌生账号尝试联系时通知信任用户 |
+| `thinkingDigestSec` | 15 | 思考心跳刷新间隔（秒） |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件，待用） |
 
 完整配置见插件源码 `src/node/index.ts` 的 `Config`。

@@ -70,6 +70,8 @@ export interface NodeConfig {
   allowGroups?: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
   cardMode?: 'off' | 'long'
+  /** Notify trusted users when a non-allowlisted sender attempts contact. */
+  notifyRejected?: boolean
   /** Chrome binary path for the long-card renderer (auto-detected when unset). */
   chromePath?: string
 }
@@ -112,7 +114,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     minSendIntervalMs: config.minSendIntervalMs ?? 5_000,
     rateLimitBackoffSecs: config.rateLimitBackoffSecs ?? [10, 30, 60],
     sessionExpiredPauseMin: config.sessionExpiredPauseMin ?? 60,
-    thinkingDigestSec: config.thinkingDigestSec ?? 10,
+    thinkingDigestSec: config.thinkingDigestSec ?? 15,
     typingHeartbeatSec: config.typingHeartbeatSec ?? 25,
     menuTimeoutSec: config.menuTimeoutSec ?? 60,
     markdownMode: config.markdownMode ?? 'passthrough',
@@ -128,6 +130,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     mediaRetentionDays: config.mediaRetentionDays ?? 30,
     allowGroups: config.allowGroups ?? [],
     cardMode: config.cardMode ?? 'off',
+    notifyRejected: config.notifyRejected ?? false,
     chromePath: config.chromePath,
   }
   const node = new WechatBridgeNode(ctx, resolved)

@@ -101,7 +101,7 @@ export const Config: z<Config> = z.object({
   minSendIntervalMs: z.number().default(5_000),
   rateLimitBackoffSecs: z.array(z.number()).default([10, 30, 60]),
   sessionExpiredPauseMin: z.number().default(60),
-  thinkingDigestSec: z.number().default(10),
+  thinkingDigestSec: z.number().default(15),
   menuTimeoutSec: z.number().default(60),
   markdownMode: z.union(['passthrough', 'filter', 'plain']).default('passthrough'),
   progressToolPrefixes: z.array(z.string()).default([]),
@@ -116,6 +116,8 @@ export const Config: z<Config> = z.object({
   mediaRetentionDays: z.number().default(30),
   allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
   cardMode: z.union(['off', 'long']).default('off'),
+  /** Notify trusted users when a non-allowlisted sender attempts contact. */
+  notifyRejected: z.boolean().default(false),
   chromePath: z.string(),
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
