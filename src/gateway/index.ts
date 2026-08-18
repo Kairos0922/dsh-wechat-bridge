@@ -44,6 +44,7 @@ import {
   UPLOAD_MEDIA_IMAGE,
   UPLOAD_MEDIA_VIDEO,
   WEIXIN_CDN_BASE_URL,
+  classifySendFailure,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
@@ -60,7 +61,7 @@ import {
   uploadBufferToCdn,
   UPLOAD_MAX_BYTES,
 } from './upload.ts'
-import { debugLog, debugLogMediaCapture } from '../debug-log.ts'
+import { debugLogEvent, debugLogMediaCapture } from '../debug-log.ts'
 import { PollCursorStore, SeenStore } from '../seen.ts'
 
 export interface GatewayConfig {
@@ -206,9 +207,9 @@ export class WechatGateway extends Service {
     // sends but never deliver them after an abrupt restart.
     try {
       await notifyStart({ baseUrl: creds.baseUrl || this.c.baseUrl, token: creds.botToken })
-      debugLog({ event: 'notify-start', ok: true })
+      debugLogEvent({ event: 'notify-start', ok: true })
     } catch (err) {
-      debugLog({ event: 'notify-start', ok: false, error: String(err).slice(0, 200) })
+      debugLogEvent({ event: 'notify-start', ok: false, error: String(err).slice(0, 200) })
     }
     this.status = 'polling'
     void this.pollLoop(creds)
@@ -389,7 +390,7 @@ export class WechatGateway extends Service {
             // Back online after consecutive failures — tell the peers (the
             // bridge node broadcasts to trusted senders).
             this.ctx.emit('wechat/back-online')
-            debugLog({ event: 'poll-recovered' })
+            debugLogEvent({ event: 'poll-recovered' })
           }
           const errcode = batch.errcode
           if (errcode === SESSION_EXPIRED_ERRCODE || (errcode === -2 && /unknown error/i.test(batch.errmsg ?? ''))) {
@@ -400,7 +401,7 @@ export class WechatGateway extends Service {
             // Only an actual identity change (re-pair) resets the cursor.
             this.status = 'paused'
             this.pairingMessage = '会话过期，若重新扫码配对将自动恢复'
-            debugLog({ event: 'poll-session-expired', errcode, errmsg: batch.errmsg })
+            debugLogEvent({ event: 'poll-session-expired', errcode, errmsg: batch.errmsg })
             this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(%s)，10 分钟后重试', errcode)
             await new Promise((r) => setTimeout(r, 10 * 60_000))
             const fresh = await this.resolveCredentials()
@@ -418,12 +419,12 @@ export class WechatGateway extends Service {
           }
           if (errcode === RATE_LIMIT_ERRCODE) {
             this.status = 'paused'
-            debugLog({ event: 'poll-rate-limited' })
+            debugLogEvent({ event: 'poll-rate-limited' })
             await new Promise((r) => setTimeout(r, 30_000))
             continue
           }
           if (errcode !== undefined && errcode < 0) {
-            debugLog({ event: 'poll-negative-errcode', errcode, errmsg: batch.errmsg })
+            debugLogEvent({ event: 'poll-negative-errcode', errcode, errmsg: batch.errmsg })
             await new Promise((r) => setTimeout(r, 5_000))
             continue
           }
@@ -441,12 +442,12 @@ export class WechatGateway extends Service {
             this.status = 'stopped'
             this.stopPolling = true
             this.pairingMessage = '403：同一微信号存在另一个轮询者（唯一轮询锁）'
-            debugLog({ event: 'poll-403-fatal' })
+            debugLogEvent({ event: 'poll-403-fatal' })
             this.ctx.logger.warn('[dsh-wechat-bridge] HTTP 403：另一个轮询者持有该微信号的轮询锁，已停止')
             break
           }
           failures += 1
-          debugLog({ event: 'poll-error', failures, error: String(err).slice(0, 200) })
+          debugLogEvent({ event: 'poll-error', failures, error: String(err).slice(0, 200) })
           this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s', failures, String(err))
           await new Promise((r) => setTimeout(r, 2_000))
         } finally {
@@ -479,7 +480,7 @@ export class WechatGateway extends Service {
         ?.filter((item) => item.type === ITEM_TEXT)
         .map((item) => item.text_item?.text ?? '')
         .join('')
-      debugLog({
+      debugLogEvent({
         event: 'inbound',
         msgId: id ?? null,
         from: senderId,
@@ -547,31 +548,43 @@ export class WechatGateway extends Service {
       }
       // A success clears the sticky failure banner on the settings panel.
       this.lastSendError = null
-      debugLog({
+      debugLogEvent({
         event: 'send',
         to: params.toUserId,
         ok: true,
         itemType: params.item.type ?? null,
         len: params.item.text_item?.text?.length ?? null,
-        ctxToken: params.contextToken ?? null,
+        ctxToken: params.contextToken ? `…${params.contextToken.slice(-12)}` : null,
         text: params.item.text_item?.text?.slice(0, 60) ?? null,
-        resp,
       })
       return result
     } catch (err) {
       // Failure classification: an IlinkSendError means the SERVER answered
-      // with ret != 0 — retrying the same payload cannot succeed. Anything
-      // else (fetch timeout/network/HTTP) is transport-level and retryable.
+      // with ret != 0. Most such errors are genuinely non-retryable — except
+      // the rate-limit/session-class ret=-2 (protocol.md §5), which the
+      // dispatch/outbox layers recover from (tokenless resend / backoff) via
+      // `failureClass`. Anything else (fetch timeout/network/HTTP) is
+      // transport-level and retryable.
       const serverRejected = err instanceof IlinkSendError
-      const record = {
+      const failureClass = serverRejected ? classifySendFailure(err.ret, err.errcode, err.errmsg) : undefined
+      const record: SendResult = {
         ok: false,
         ret: serverRejected ? err.ret : undefined,
         errcode: serverRejected ? err.errcode : undefined,
         errmsg: err instanceof Error ? err.message : String(err),
         retryable: !serverRejected,
+        failureClass,
       }
-      this.lastSendError = { errcode: record.errcode, errmsg: record.errmsg.slice(0, 200), at: Date.now() }
-      debugLog({ event: 'send', to: params.toUserId, ...record })
+      this.lastSendError = { errcode: record.errcode, errmsg: (record.errmsg ?? '').slice(0, 200), at: Date.now() }
+      debugLogEvent({
+        event: 'send',
+        to: params.toUserId,
+        ...record,
+        failureClass: failureClass ?? null,
+        itemType: params.item.type ?? null,
+        len: params.item.text_item?.text?.length ?? null,
+        ctxToken: params.contextToken ? `…${params.contextToken.slice(-12)}` : null,
+      })
       return record
     }
   }
@@ -632,7 +645,7 @@ export class WechatGateway extends Service {
       if (slot.ret && slot.ret !== 0) {
         const result: SendResult = { ok: false, ret: slot.ret, errcode: slot.errcode, errmsg: slot.errmsg, retryable: false }
         this.lastSendError = { errcode: slot.errcode, errmsg: (slot.errmsg ?? '').slice(0, 200), at: Date.now() }
-        debugLog({ event: 'send-media', to: params.toUserId, ok: false, ret: slot.ret, errcode: slot.errcode })
+        debugLogEvent({ event: 'send-media', to: params.toUserId, ok: false, ret: slot.ret, errcode: slot.errcode })
         return result
       }
       const { downloadParam } = await uploadBufferToCdn({
@@ -667,7 +680,7 @@ export class WechatGateway extends Service {
     } catch (err) {
       const record: SendResult = { ok: false, errmsg: err instanceof Error ? err.message : String(err), retryable: true }
       this.lastSendError = { errmsg: record.errmsg!.slice(0, 200), at: Date.now() }
-      debugLog({ event: 'send-media', to: params.toUserId, ok: false, error: record.errmsg!.slice(0, 200) })
+      debugLogEvent({ event: 'send-media', to: params.toUserId, ok: false, error: record.errmsg!.slice(0, 200) })
       return record
     }
   }

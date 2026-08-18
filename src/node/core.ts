@@ -18,15 +18,15 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import type { InboundEvent, MessageItem } from '../gateway/types.ts'
-import { attachApprovalBridge, type PendingApproval } from './approvals.ts'
+import type { InboundEvent, MessageItem, SendResult } from '../gateway/types.ts'
+import { attachApprovalBridge, buildApprovalPrompt, type PendingApproval } from './approvals.ts'
 import { listSessions, routeCommand } from './commands.ts'
 import { handleInbound } from './inbound.ts'
 import { attachSessionOutbound, sendTextToPeer, splitForWechat } from './outbound.ts'
 import { listModes } from './presets.ts'
 import { attachMediaRetention } from './retention.ts'
 import { resolveMode } from './presets.ts'
-import { debugLog } from '../debug-log.ts'
+import { debugLog, debugLogEvent } from '../debug-log.ts'
 import { BridgeState } from './state.ts'
 import { Outbox, OUTBOX_PRIORITY, type OutboxEntry, type OutboxEntryKind } from './outbox.ts'
 import type { MarkdownMode } from './markdown.ts'
@@ -89,6 +89,14 @@ export function newSessionId(): SessionId {
   return SessionId(`wechat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
 }
 
+/**
+ * Outbox coalesce-key prefix for approval prompts (per-approval key:
+ * `approval:<peer>:<number>`). A dropped prompt is marked for re-push
+ * (approvalPromptDropped); a re-push of the same approval replaces its
+ * still-queued copy instead of duplicating (coalesce semantics).
+ */
+export const APPROVAL_COALESCE_PREFIX = 'approval:'
+
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export function buildWelcomeMessage(opts: { allowFromEmpty: boolean; defaultModeName: string | null }): string {
   const trust = opts.allowFromEmpty
@@ -143,6 +151,12 @@ export class WechatBridgeNode {
   private readonly lastUserText = new Map<string, string>()
   private readonly pending = new Map<number, PendingApproval>()
   private approvalCounter = 0
+  /**
+   * Peers whose approval prompt failed to deliver (outbox drop). The prompt
+   * is re-pushed on the peer's next inbound message — the user is at the
+   * phone exactly then, and the channel is demonstrably alive.
+   */
+  private readonly approvalPromptDropped = new Set<string>()
   private disposers: Array<() => void> = []
 
   constructor(ctx: Context, config: ResolvedNodeConfig) {
@@ -165,12 +179,25 @@ export class WechatBridgeNode {
       backoffSecs: config.rateLimitBackoffSecs,
       sessionExpiredPauseMs: config.sessionExpiredPauseMin * 60_000,
       send: (entry) => this.dispatchOutboxEntry(entry),
-      // Media that exhausted its retry budget must not fail silently — the
-      // user asked for a picture/video and gets a straight answer instead of
-      // a mystery. (File entries already degrade to text via dispatch.)
+      // Any message that exhausted its retry budget must not fail silently —
+      // the user asked for it and gets a straight answer instead of a mystery.
+      // (Files already degrade to text via dispatch; system entries are
+      // themselves notices, so notifying again would chain forever on a dead
+      // channel.)
       onDrop: (entry, reason, result) => {
-        if (reason !== 'failed' || !entry.media || entry.kind === 'file') return
-        const label = entry.kind === 'image' ? '图片' : entry.kind === 'video' ? '视频' : '文件'
+        // An approval prompt that could not be delivered is NOT dropped for
+        // good: it is re-pushed the moment the user's next inbound message
+        // proves the channel recovered (see retryApprovalPrompt). Marking it
+        // here keeps the "审批必须到手机" guarantee without a success ack.
+        if (entry.coalesceKey?.startsWith(APPROVAL_COALESCE_PREFIX)) {
+          if (reason !== 'coalesced') {
+            this.approvalPromptDropped.add(entry.to ?? '')
+            debugLogEvent({ event: 'approval-prompt-dropped', peer: entry.to, reason })
+          }
+          return
+        }
+        if (reason !== 'failed' || entry.kind === 'system' || entry.kind === 'file') return
+        const label = entry.kind === 'image' ? '图片' : entry.kind === 'video' ? '视频' : '消息'
         const err = result?.errmsg ? `：${result.errmsg.slice(0, 120)}` : ''
         this.enqueueText(entry.to ?? '', `❌ ${label}发送失败${err}`, { kind: 'system' })
       },
@@ -262,29 +289,65 @@ export class WechatBridgeNode {
 
   // ---------------------------------------------------------------- outbox
 
-  private async dispatchOutboxEntry(entry: OutboxEntry): Promise<{ ok: boolean; ret?: number; errcode?: number; errmsg?: string; messageId?: number }> {
+  private async dispatchOutboxEntry(entry: OutboxEntry): Promise<SendResult> {
     const to = entry.to
     if (!to) return { ok: false, errmsg: 'no peer bound to outbox entry' }
     const target = this.peerTargets.get(to) ?? to
-    const token = this.peerContextTokens.get(to)
+    let token = this.peerContextTokens.get(to)
     const runId = this.peerRunIds.get(to)
+    const result = await this.sendWithEntry(entry, target, token, runId)
+
+    // Stale-session recovery: the server reported the context_token expired
+    // ("prepare failed" / "unknown error", protocol.md §5). iLink accepts
+    // tokenless sends as a degraded fallback (chatnode/hermes port). Delete
+    // the stale token compare-and-delete so a concurrently refreshed token
+    // survives, then retry ONCE without a token — this extra attempt does not
+    // consume the outbox retry budget, and any later outbox retries are
+    // naturally tokenless because the cache entry is gone.
+    if (result.failureClass === 'stale-session' && token) {
+      if (this.peerContextTokens.get(to) === token) {
+        this.setPeerContextToken(to, null)
+        debugLogEvent({ event: 'send-token-invalidated', peer: to, token: `…${token.slice(-12)}` })
+      }
+      // A short pause so the tokenless resend is not a same-instant burst.
+      await new Promise((r) => setTimeout(r, 1_000))
+      const retried = await this.sendWithEntry(entry, target, undefined, runId)
+      debugLogEvent({
+        event: 'send-tokenless-retry',
+        peer: to,
+        ok: retried.ok,
+        failureClass: retried.failureClass ?? null,
+        errmsg: retried.errmsg?.slice(0, 120) ?? null,
+      })
+      return retried
+    }
+    return result
+  }
+
+  /** One actual send for an outbox entry (kind-dispatch). */
+  private async sendWithEntry(
+    entry: OutboxEntry,
+    target: string,
+    contextToken: string | undefined,
+    runId: string | undefined,
+  ): Promise<SendResult> {
     if (entry.kind === 'tool-start' || entry.kind === 'tool-result') {
       if (entry.item === undefined) return { ok: false, errmsg: 'missing item' }
-      return this.ctx.wechat.sendItem({ toUserId: target, contextToken: token, runId, item: entry.item })
+      return this.ctx.wechat.sendItem({ toUserId: target, contextToken, runId, item: entry.item })
     }
     if (entry.kind === 'file' || entry.kind === 'image' || entry.kind === 'video') {
       if (entry.media === undefined) return { ok: false, errmsg: 'missing media' }
       if (entry.kind === 'image') {
-        return this.ctx.wechat.sendImage({ toUserId: target, filePath: entry.media.filePath, contextToken: token, runId })
+        return this.ctx.wechat.sendImage({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
       }
       if (entry.kind === 'video') {
-        return this.ctx.wechat.sendVideo({ toUserId: target, filePath: entry.media.filePath, contextToken: token, runId })
+        return this.ctx.wechat.sendVideo({ toUserId: target, filePath: entry.media.filePath, contextToken, runId })
       }
       const result = await this.ctx.wechat.sendFile({
         toUserId: target,
         filePath: entry.media.filePath,
         fileName: entry.media.fileName,
-        contextToken: token,
+        contextToken,
         runId,
       })
       // Graceful degradation: when the file channel fails outright, deliver the
@@ -292,12 +355,12 @@ export class WechatBridgeNode {
       if (!result.ok && entry.text) {
         const chunks = splitForWechat(entry.text, this.resolved.maxMessageChars)
         for (const [index, chunk] of chunks.entries()) {
-          this.enqueueText(to, index === 0 ? chunk : chunk, { kind: 'text' })
+          this.enqueueText(entry.to ?? '', index === 0 ? chunk : chunk, { kind: 'text' })
         }
       }
       return result
     }
-    return this.ctx.wechat.sendText({ toUserId: target, text: entry.text ?? '', contextToken: token, runId })
+    return this.ctx.wechat.sendText({ toUserId: target, text: entry.text ?? '', contextToken, runId })
   }
 
   /** Enqueue a text-ish bubble for a peer (chunking already applied by callers). */
@@ -314,6 +377,39 @@ export class WechatBridgeNode {
       coalesceKey: opts.coalesceKey,
       createdAt: Date.now(),
     })
+  }
+
+  /**
+   * Enqueue an approval prompt with the approval coalesce key — a newer
+   * prompt replaces a still-queued older one (never piles up), and a dropped
+   * one is marked for re-push on the peer's next inbound message.
+   */
+  enqueueApprovalPrompt(peerId: string, text: string, number: number): void {
+    this.enqueueText(peerId, text, {
+      kind: 'system',
+      coalesceKey: `${APPROVAL_COALESCE_PREFIX}${peerId}:${number}`,
+    })
+  }
+
+  /**
+   * Re-push the peer's pending approval prompt after a delivery failure —
+   * called on the peer's next inbound message (channel recovered, user at
+   * the phone). No-op unless a prompt was actually dropped and the approval
+   * is still within its waiting window.
+   */
+  retryApprovalPrompt(peerId: string): void {
+    if (!this.approvalPromptDropped.has(peerId)) return
+    this.approvalPromptDropped.delete(peerId)
+    let pushed = 0
+    for (const pending of this.pending.values()) {
+      if (pending.peerId !== peerId) continue
+      const prompt = buildApprovalPrompt(pending.request, pending.number, this.resolved.approvalTimeoutSec)
+      this.enqueueApprovalPrompt(peerId, prompt, pending.number)
+      pushed += 1
+    }
+    if (pushed > 0) {
+      debugLogEvent({ event: 'approval-prompt-resent', peer: peerId, count: pushed })
+    }
   }
 
   /** Enqueue a bot progress card item (TOOL_CALL_START / TOOL_CALL_RESULT). */

@@ -177,3 +177,136 @@ test('stopTurn: friendly feedback when nothing is running', async () => {
   assert.ok(sent.some((t) => t.includes('没有执行中的任务')))
   node.dispose()
 })
+
+test('stale-session (prepare failed): tokenless resend recovers and clears the token', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-stale-'))
+  try {
+    const sends: Array<{ token: string | undefined; text: string }> = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { toUserId: string; text: string; contextToken?: string }) => {
+          sends.push({ token: p.contextToken, text: p.text })
+          // First send with the stale token → prepare failed (the 2026-08-18
+          // incident signature); tokenless resend succeeds.
+          return p.contextToken !== undefined
+            ? { ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=prepare failed', retryable: false, failureClass: 'stale-session' }
+            : { ok: true, messageId: 42 }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1 } as never)
+    node.setPeerTarget('peer-a@im.wechat', 'peer-a@im.wechat')
+    node.setPeerContextToken('peer-a@im.wechat', 'tok-stale-123')
+    node.enqueueText('peer-a@im.wechat', '任务计划')
+    await node.outbox.drain()
+    assert.equal(sends.length, 2, 'one stale-token send + one tokenless resend')
+    assert.equal(sends[0]?.token, 'tok-stale-123')
+    assert.equal(sends[1]?.token, undefined, 'resend carries NO context token')
+    assert.equal(sends[1]?.text, '任务计划')
+    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), null, 'stale token cleared')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
+test('stale-session recovery does not clear a concurrently refreshed token', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-cmpdel-'))
+  try {
+    const sends: Array<{ token: string | undefined }> = []
+    let node: WechatBridgeNode
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { contextToken?: string }) => {
+          sends.push({ token: p.contextToken })
+          if (p.contextToken !== undefined) {
+            // An inbound message refreshes the token WHILE the stale-token
+            // send is in flight — compare-and-delete must not kill it.
+            node.setPeerContextToken('peer-a@im.wechat', 'tok-fresh')
+            return { ok: false, ret: -2, errmsg: 'prepare failed', retryable: false, failureClass: 'stale-session' }
+          }
+          return { ok: true, messageId: 1 }
+        },
+      },
+    }
+    node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1 } as never)
+    node.setPeerTarget('peer-a@im.wechat', 'peer-a@im.wechat')
+    node.setPeerContextToken('peer-a@im.wechat', 'tok-old')
+    node.enqueueText('peer-a@im.wechat', 'hi')
+    await node.outbox.drain()
+    assert.equal(sends.length, 2)
+    assert.equal(sends[0]?.token, 'tok-old', 'sends the token that was stale')
+    assert.equal(sends[1]?.token, undefined, 'tokenless resend still fires')
+    // Compare-and-delete must NOT have removed the refreshed token.
+    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), 'tok-fresh')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
+test('a dropped approval prompt is re-pushed by the inbound retry hook', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-apr-'))
+  try {
+    const sends: string[] = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { text: string }) => {
+          sends.push(p.text)
+          return { ok: false, ret: 100, errmsg: 'channel dead', retryable: false, failureClass: 'generic' }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1 } as never)
+    node.registerApproval(1, {
+      number: 1,
+      peerId: 'peer-a@im.wechat',
+      request: { toolName: 'bash', reason: 'needs consent', agent: { session: { events: [] } } },
+      resolve: () => {},
+      timer: setTimeout(() => {}, 600_000),
+    } as never)
+    // First delivery fails → outbox drop marks the prompt as undelivered.
+    node.enqueueApprovalPrompt('peer-a@im.wechat', '🔐 #1 需要你的确认')
+    await node.outbox.drain()
+    assert.equal(sends.length, 1)
+    // The user's next inbound message triggers the re-push.
+    node.retryApprovalPrompt('peer-a@im.wechat')
+    await node.outbox.drain()
+    assert.equal(sends.length, 2, 'prompt re-pushed after the inbound hook')
+    assert.match(sends[1]!, /需要你的确认/)
+    assert.match(sends[1]!, /#1/)
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
+test('retryApprovalPrompt is a no-op without a dropped prompt', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-apr2-'))
+  try {
+    const sends: string[] = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { text: string }) => {
+          sends.push(p.text)
+          return { ok: true, messageId: 1 }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1 } as never)
+    node.retryApprovalPrompt('peer-a@im.wechat')
+    await node.outbox.drain()
+    assert.equal(sends.length, 0, 'no inbound hook effect without a dropped prompt')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})

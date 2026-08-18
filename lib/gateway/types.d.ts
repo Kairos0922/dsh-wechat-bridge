@@ -15,6 +15,24 @@ export declare const MAX_MESSAGE_CHARS = 2000;
 /** iLink errcodes (from the official backend protocol). */
 export declare const RATE_LIMIT_ERRCODE = -12;
 export declare const SESSION_EXPIRED_ERRCODE = -14;
+/**
+ * ret=-2 is the rate-limit/session-class business error (docs/protocol.md §5).
+ * Its MEANING lives in `errmsg`: "prepare failed" / "unknown error" = stale
+ * context_token (recover by resending WITHOUT the token — iLink accepts
+ * tokenless sends as a degraded fallback); "rate limited" / "freq limit" =
+ * frequency limit (recover by backing off). Any other -2 text is treated as
+ * a frequency limit (hermes-agent classification, RATE_LIMIT_ERRCODE=-2).
+ */
+export declare const SESSION_CLASS_RET = -2;
+export declare const STALE_SESSION_ERRMSG_MARKERS: readonly ["prepare failed", "unknown error"];
+export declare const RATE_LIMIT_ERRMSG_MARKERS: readonly ["rate limited", "freq limit"];
+/**
+ * Business-level failure classes driving the outbox's recovery strategy.
+ * `ret=-2` carries two meanings distinguished by `errmsg` (protocol.md §5).
+ */
+export type SendFailureClass = 'stale-session' | 'rate-limit' | 'session-expired' | 'generic';
+/** Classify a server-side send failure (ret/errcode/errmsg verbatim). */
+export declare function classifySendFailure(ret: number | undefined, errcode: number | undefined, errmsg: string | undefined): SendFailureClass;
 export declare const ITEM_TEXT = 1;
 export declare const ITEM_IMAGE = 2;
 export declare const ITEM_VOICE = 3;
@@ -123,9 +141,16 @@ export interface SendResult {
     errmsg?: string;
     messageId?: number;
     /**
+     * Server-side business classification (when `ret != 0`): stale-session and
+     * rate-limit are RECOVERABLE (tokenless resend / backoff); generic is a
+     * permanent rejection of this payload.
+     */
+    failureClass?: SendFailureClass;
+    /**
      * Whether a retry may succeed. false = the SERVER explicitly rejected the
-     * message (ret != 0, e.g. prepare failed) — retrying is pointless. true or
-     * undefined = transport-level failure (timeout/network/HTTP) — retryable.
+     * message with a business error other than the rate-limit/session-class
+     * ret=-2 (protocol.md §5) — retrying is pointless. true or undefined =
+     * transport-level failure (timeout/network/HTTP) — retryable.
      */
     retryable?: boolean;
 }

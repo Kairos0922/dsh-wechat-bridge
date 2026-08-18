@@ -10,6 +10,12 @@
  */
 export declare function debugLog(event: Record<string, unknown>): void;
 /**
+ * Append to the key-event sink (events.jsonl). Use for facts that must
+ * survive chunk-heavy sessions: inbound, send outcomes, poll health, notify,
+ * approval lifecycle. Same capped-tail semantics as debug.log.
+ */
+export declare function debugLogEvent(event: Record<string, unknown>): void;
+/**
  * Capture a FULL inbound media item verbatim (no truncation). The debug log
  * only keeps a 1200-char digest; this sink preserves the complete official
  * client outbound shape — including the full encrypt_query_param, thumb_media

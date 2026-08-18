@@ -79,6 +79,13 @@ export interface ResolvedNodeConfig {
 }
 /** Default session id prefix for /new-created sessions. */
 export declare function newSessionId(): SessionId;
+/**
+ * Outbox coalesce-key prefix for approval prompts (per-approval key:
+ * `approval:<peer>:<number>`). A dropped prompt is marked for re-push
+ * (approvalPromptDropped); a re-push of the same approval replaces its
+ * still-queued copy instead of duplicating (coalesce semantics).
+ */
+export declare const APPROVAL_COALESCE_PREFIX = "approval:";
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export declare function buildWelcomeMessage(opts: {
     allowFromEmpty: boolean;
@@ -116,18 +123,39 @@ export declare class WechatBridgeNode {
     private readonly lastUserText;
     private readonly pending;
     private approvalCounter;
+    /**
+     * Peers whose approval prompt failed to deliver (outbox drop). The prompt
+     * is re-pushed on the peer's next inbound message — the user is at the
+     * phone exactly then, and the channel is demonstrably alive.
+     */
+    private readonly approvalPromptDropped;
     private disposers;
     constructor(ctx: Context, config: ResolvedNodeConfig);
     /** Mount the bridge: outbound digest, approval answerer, inbound gate. */
     attach(): void;
     dispose(): void;
     private dispatchOutboxEntry;
+    /** One actual send for an outbox entry (kind-dispatch). */
+    private sendWithEntry;
     /** Enqueue a text-ish bubble for a peer (chunking already applied by callers). */
     enqueueText(peerId: string, text: string, opts?: {
         kind?: OutboxEntryKind;
         priority?: number;
         coalesceKey?: string;
     }): void;
+    /**
+     * Enqueue an approval prompt with the approval coalesce key — a newer
+     * prompt replaces a still-queued older one (never piles up), and a dropped
+     * one is marked for re-push on the peer's next inbound message.
+     */
+    enqueueApprovalPrompt(peerId: string, text: string, number: number): void;
+    /**
+     * Re-push the peer's pending approval prompt after a delivery failure —
+     * called on the peer's next inbound message (channel recovered, user at
+     * the phone). No-op unless a prompt was actually dropped and the approval
+     * is still within its waiting window.
+     */
+    retryApprovalPrompt(peerId: string): void;
     /** Enqueue a bot progress card item (TOOL_CALL_START / TOOL_CALL_RESULT). */
     enqueueToolCard(peerId: string, kind: 'tool-start' | 'tool-result', item: MessageItem): void;
     /** Enqueue a local file/image/video artifact for CDN upload + send. */

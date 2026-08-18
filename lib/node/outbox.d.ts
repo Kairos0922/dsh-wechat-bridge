@@ -46,6 +46,13 @@ export declare const OUTBOX_PRIORITY: {
 };
 /** Max attempts (1 send + this many retries) for transport-level failures. */
 export declare const OUTBOX_MAX_ATTEMPTS = 3;
+/**
+ * Max attempts for the ret=-2 rate-limit/session-class error (protocol.md §5).
+ * Larger than the transport budget because the channel needs a real cooldown
+ * window (10s→30s→60s→60s) before a retry can succeed — 3 attempts would give
+ * up after only 40s and silently lose a message the server never rejected.
+ */
+export declare const OUTBOX_RATE_LIMIT_MAX_ATTEMPTS = 5;
 export interface OutboxOptions {
     minIntervalMs: number;
     backoffSecs: number[];
@@ -82,5 +89,7 @@ export declare class Outbox {
      * retry; false when the entry is settled (delivered, paused, or dropped).
      */
     private handleResult;
+    /** Escalating backoff seconds for rate-limit-class errors, shared with -12. */
+    private nextBackoffSecs;
 }
 //# sourceMappingURL=outbox.d.ts.map

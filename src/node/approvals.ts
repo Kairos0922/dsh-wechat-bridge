@@ -41,6 +41,23 @@ export function approvalArgsSummary(request: ApprovalRequest): string | null {
   return null
 }
 
+/** Build the WeChat approval prompt text (shared by first send and re-push). */
+export function buildApprovalPrompt(
+  request: ApprovalRequest,
+  number: number,
+  timeoutSec: number,
+): string {
+  const args = approvalArgsSummary(request)
+  return [
+    `🔐 #${number} 需要你的确认`,
+    `工具: ${request.toolName}`,
+    ...(args !== null ? [`参数: ${args}`] : []),
+    ...(request.reason ? [`原因: ${request.reason}`] : []),
+    '回复 /yes 同意，/no 拒绝（仅一条待确认时也可回复 1/2）',
+    `${Math.max(1, Math.round(timeoutSec / 60))} 分钟内未回复将自动拒绝。`,
+  ].join('\n')
+}
+
 /** Attach the `approval/request` answerer. Returns a disposer. */
 export function attachApprovalBridge(node: WechatBridgeNode): () => void {
   const listener = async (
@@ -53,18 +70,13 @@ export function attachApprovalBridge(node: WechatBridgeNode): () => void {
 
     const number = node.nextApprovalNumber()
     const timeoutSec = node.resolved.approvalTimeoutSec
-    const args = approvalArgsSummary(req)
-    const prompt = [
-      `🔐 #${number} 需要你的确认`,
-      `工具: ${req.toolName}`,
-      ...(args !== null ? [`参数: ${args}`] : []),
-      ...(req.reason ? [`原因: ${req.reason}`] : []),
-      '回复 /yes 同意，/no 拒绝（仅一条待确认时也可回复 1/2）',
-      `${Math.max(1, Math.round(timeoutSec / 60))} 分钟内未回复将自动拒绝。`,
-    ].join('\n')
+    const prompt = buildApprovalPrompt(req, number, timeoutSec)
 
     // Show the question FIRST — the user cannot answer what they cannot see.
-    void sendTextToPeer(node, peer, prompt, { kind: 'system' })
+    // The per-approval coalesce key keeps re-pushes idempotent and concurrent
+    // approvals from overwriting each other; a dropped prompt is re-pushed on
+    // the user's next inbound message (审批必达手机).
+    node.enqueueApprovalPrompt(peer, prompt, number)
 
     const outcome = await new Promise<ApprovalOutcome>((resolve) => {
       const timer = setTimeout(() => {

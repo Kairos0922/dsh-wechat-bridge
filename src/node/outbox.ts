@@ -49,6 +49,14 @@ export const OUTBOX_PRIORITY = { system: 10, text: 20, tool: 25, progress: 30 } 
 /** Max attempts (1 send + this many retries) for transport-level failures. */
 export const OUTBOX_MAX_ATTEMPTS = 3
 
+/**
+ * Max attempts for the ret=-2 rate-limit/session-class error (protocol.md §5).
+ * Larger than the transport budget because the channel needs a real cooldown
+ * window (10s→30s→60s→60s) before a retry can succeed — 3 attempts would give
+ * up after only 40s and silently lose a message the server never rejected.
+ */
+export const OUTBOX_RATE_LIMIT_MAX_ATTEMPTS = 5
+
 export interface OutboxOptions {
   minIntervalMs: number
   backoffSecs: number[]
@@ -213,11 +221,27 @@ export class Outbox {
       return false
     }
     if (result.errcode === RATE_LIMIT_ERRCODE) {
-      const steps = this.opts.backoffSecs
-      const secs = steps[Math.min(this.backoffIdx, steps.length - 1)] ?? steps[steps.length - 1] ?? 10
-      this.backoffIdx += 1
-      this.pausedUntil = this.opts.now() + secs * 1000
+      this.pausedUntil = this.opts.now() + this.nextBackoffSecs() * 1000
       this.onPause?.(this.pausedUntil, 'rate-limit')
+      return false
+    }
+    // ret=-2 (errcode absent): the rate-limit/session-class business error —
+    // see docs/protocol.md §5 ("曾被误读为媒体形状被服务器拒绝——实际是限流/
+    // 会话类业务错误"). NOT a permanent rejection: the channel needs a
+    // cooldown, not a silent drop. Pause with escalating backoff and re-queue
+    // the entry, so a transient limit degrades to delayed delivery instead of
+    // the observed "卡住" (every subsequent message dropped, channel dead).
+    // File entries are excluded: their text fallback already fired during
+    // dispatch, so retrying would duplicate the delivery.
+    if (result.ret === -2 && entry.kind !== 'file') {
+      const attempts = (entry.retryCount ?? 0) + 1
+      if (attempts < OUTBOX_RATE_LIMIT_MAX_ATTEMPTS) {
+        this.pausedUntil = this.opts.now() + this.nextBackoffSecs() * 1000
+        this.onPause?.(this.pausedUntil, 'rate-limit')
+        return true
+      }
+      this.backoffIdx = 0
+      this.onDrop?.(entry, 'failed', result)
       return false
     }
     // Generic failure. Transport-level (retryable) failures re-enqueue within
@@ -231,5 +255,13 @@ export class Outbox {
     this.backoffIdx = 0
     this.onDrop?.(entry, 'failed', result)
     return false
+  }
+
+  /** Escalating backoff seconds for rate-limit-class errors, shared with -12. */
+  private nextBackoffSecs(): number {
+    const steps = this.opts.backoffSecs
+    const secs = steps[Math.min(this.backoffIdx, steps.length - 1)] ?? steps[steps.length - 1] ?? 10
+    this.backoffIdx += 1
+    return secs
   }
 }

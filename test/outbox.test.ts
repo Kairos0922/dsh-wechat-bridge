@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { Outbox, OUTBOX_PRIORITY, type OutboxEntry } from '../src/node/outbox.ts'
+import { Outbox, OUTBOX_PRIORITY, OUTBOX_RATE_LIMIT_MAX_ATTEMPTS, type OutboxEntry } from '../src/node/outbox.ts'
 import type { SendResult } from '../src/gateway/types.ts'
 
 function makeOutbox(overrides: {
@@ -167,7 +167,69 @@ test('transport-level (retryable) failures re-enqueue and succeed on retry', asy
   assert.equal(sent[2]?.retryCount, 2)
 })
 
-test('server rejections (retryable === false) drop immediately', async () => {
+test('ret=-2 (rate-limit class) backs off and delivers on recovery', async () => {
+  // docs/protocol.md §5: ret=-2 is a rate-limit/session-class business error
+  // ("曾被误读为媒体形状被服务器拒绝——实际是限流/会话类业务错误"), NOT a
+  // permanent rejection. The outbox must pause (no hammering) and retry the
+  // entry, so a transient limit degrades to delayed delivery instead of the
+  // observed "卡住" (channel dead, subsequent messages silently dropped).
+  let now = 0
+  const sleeps: number[] = []
+  const sent: OutboxEntry[] = []
+  let attempts = 0
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10, 30, 60],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      now += ms
+    },
+    send: async (e) => {
+      sent.push(e)
+      attempts += 1
+      return attempts === 1 ? { ok: false, ret: -2, errmsg: 'prepare failed' } : { ok: true, messageId: 42 }
+    },
+  })
+  outbox.enqueue(entry({ text: '任务计划' }))
+  await outbox.drain()
+  assert.equal(sent.length, 2, 'one attempt + one retry after the cooldown')
+  assert.equal(sent[0]?.retryCount ?? 0, 0)
+  assert.equal(sent[1]?.retryCount, 1)
+  assert.equal(sent[1]?.text, '任务计划')
+  assert.ok(sleeps.includes(10_000), 'waits out the first backoff before retrying')
+  assert.equal(outbox.getPausedUntil(), null, 'queue resumes after the cooldown')
+})
+
+test('ret=-2 retry budget exhausted drops with failed (not silent)', async () => {
+  let now = 0
+  const dropped: OutboxEntry[] = []
+  const reasons: string[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms
+    },
+    onDrop: (e, reason) => {
+      dropped.push(e)
+      reasons.push(reason)
+    },
+    send: async () => ({ ok: false, ret: -2, errmsg: 'prepare failed' }),
+  })
+  outbox.enqueue(entry({ text: 'still down' }))
+  await outbox.drain()
+  assert.equal(dropped.length, 1)
+  assert.equal(dropped[0]?.retryCount, OUTBOX_RATE_LIMIT_MAX_ATTEMPTS - 1, 'retried to the budget then dropped')
+  assert.equal(reasons[0], 'failed')
+})
+
+test('non-ret=-2 server rejections (retryable === false) drop immediately', async () => {
+  // Genuine business rejections (e.g. an upload-slot error with its own ret
+  // code) stay non-retryable: retrying the same payload cannot succeed.
   const sent: OutboxEntry[] = []
   const dropped: OutboxEntry[] = []
   const outbox = new Outbox({
@@ -178,12 +240,12 @@ test('server rejections (retryable === false) drop immediately', async () => {
     onDrop: (e) => dropped.push(e),
     send: async (e) => {
       sent.push(e)
-      return { ok: false, ret: -2, errmsg: 'prepare failed', retryable: false }
+      return { ok: false, ret: 100, errmsg: 'upload slot rejected', retryable: false }
     },
   })
   outbox.enqueue(entry({ text: 'no retry' }))
   await outbox.drain()
-  assert.equal(sent.length, 1, 'no retries for server rejections')
+  assert.equal(sent.length, 1, 'no retries for genuine server rejections')
   assert.equal(dropped.length, 1)
   assert.equal(dropped[0]?.text, 'no retry')
 })

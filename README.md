@@ -101,12 +101,15 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 - **语音气泡外发不可用**：腾讯客户端不渲染 bot 语音消息（官方参考实现同样不可见，openclaw issue #215）。
 - **群聊**：iLink 机器人身份暂无法被拉入普通微信群（腾讯侧限制），`allowGroups` 已就绪待开放。
 - **工具进度卡片**：当前微信后端对卡片 item 静默丢弃，默认关闭（`progressToolPrefixes: []`），后端支持后填前缀即可启用。
-- **限流**：微信通道无限流公开数字，出站队列自适应退避，请勿高频连发（历史教训：连续探针触发过封禁）。
+- **限流/会话过期**：微信通道无限流公开数字（`ret=-2` 的 errmsg 区分限流与 token 过期，见 `docs/protocol.md §5`）。
+  - 出站队列自适应退避（10s→30s→60s）；`prepare failed`（token 过期）自动做无 token 恢复重发，长任务不再断流。
+  - 审批提示发送失败不静默：用户下一条消息到达时自动重推（审批必达手机）。
+  - 请勿高频连发（历史教训：连续探针触发过封禁）。
 
 ## 开发
 
 ```sh
-pnpm install && pnpm verify   # build → bundle → node --check → 106 项测试
+pnpm install && pnpm verify   # build → bundle → node --check → 120 项测试
 scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 ```
 

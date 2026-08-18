@@ -178,6 +178,11 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   node.setPeerContextToken(peerKey, contextToken ?? null)
   node.setPeerRunId(peerKey, runId ?? null)
 
+  // Channel-recovery hook: a new inbound message proves the user is at the
+  // phone and the token is fresh — re-push any approval prompt whose first
+  // delivery failed (审批必达手机: see core.retryApprovalPrompt).
+  node.retryApprovalPrompt(peerKey)
+
   if (images.length > 0) {
     await handleImages(node, peerKey, message, images, text)
     return

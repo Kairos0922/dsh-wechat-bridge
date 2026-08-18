@@ -27,6 +27,8 @@ export interface PendingApproval {
 }
 /** Short argument summary from the logged tool call, when callId links one. */
 export declare function approvalArgsSummary(request: ApprovalRequest): string | null;
+/** Build the WeChat approval prompt text (shared by first send and re-push). */
+export declare function buildApprovalPrompt(request: ApprovalRequest, number: number, timeoutSec: number): string;
 /** Attach the `approval/request` answerer. Returns a disposer. */
 export declare function attachApprovalBridge(node: WechatBridgeNode): () => void;
 //# sourceMappingURL=approvals.d.ts.map

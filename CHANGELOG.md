@@ -3,6 +3,31 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循语义化版本。
 发布前版本 `<1.0.0`：破坏性变更会在 Minor 版本体现。
 
+## [Unreleased]
+
+### 修复
+
+- **出站断流根因修复（2026-08-18 事故，stale context_token）**：iLink 对过期
+  context_token 返回 `ret=-2 errmsg="prepare failed"`，旧实现把它当"服务器拒绝"
+  直接丢弃，长任务执行超过 token 时效后所有消息（含审批提示）静默丢失——表现为
+  "发了几条后没消息 / 出现任务计划后卡住"。本次：
+  - 错误分类 `classifySendFailure()`：`prepare failed` / `unknown error` =
+    stale session；`rate limited` / `freq limit` = 限流；`-12` / `-14` 保持。
+  - **tokenless 恢复**：stale session 时 compare-and-delete 缓存 token（并发
+    刷新不被误删）→ 无 token 重发一次（不消耗重试预算），后续重试自然 tokenless
+    （iLink 接受降级发送，hermes/openclaw 同款策略）。
+  - `ret=-2` 统一退避重试（10s→30s→60s，预算 5 次）而非立即丢弃。
+  - 发送失败不再静默：重试耗尽后向用户通知「❌ 消息发送失败」。
+- **审批必达手机（2026-08-18）**：审批提示发送失败不再放弃——标记待重推，
+  用户下一条入站消息（= 通道恢复 + 用户在场）自动重推；提示带审批 coalesce 键，
+  排队中不堆积。等待窗口内通道始终不通才超时自动拒绝（GUI 审批卡片兜底可见）。
+
+### 新增
+
+- **关键事件独立日志** `events.jsonl`：inbound/send（含 token 尾缀与失败分类）/
+  poll/notify/审批生命周期写入独立 sink，不再被 assistant/chunk 高频事件在
+  debug.log 轮转中冲掉（2026-08-18 排查教训）。
+
 ## [0.2.0] - 2026-08-17
 
 ### 移除
