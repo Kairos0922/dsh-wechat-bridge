@@ -265,3 +265,67 @@ test('retry budget exhausted drops with reason failed', async () => {
   assert.equal(dropped.length, 1)
   assert.equal(dropped[0]?.retryCount, 2, 'retried twice then dropped')
 })
+
+test('window budget holds sends beyond the per-window cap, then drains', async () => {
+  let now = 0
+  const sleeps: number[] = []
+  const sent: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    budget: { windowMs: 60_000, maxPerWindow: 2 },
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      now += ms
+    },
+    send: async (e) => {
+      sent.push(e)
+      return { ok: true, messageId: 1 }
+    },
+  })
+  outbox.enqueue(entry({ text: 'a' }))
+  outbox.enqueue(entry({ text: 'b' }))
+  outbox.enqueue(entry({ text: 'c' }))
+  outbox.enqueue(entry({ text: 'd' }))
+  await outbox.drain()
+  assert.equal(sent.length, 4, 'budget holds, never drops')
+  assert.equal(sent[0]?.text, 'a')
+  assert.equal(sent[1]?.text, 'b')
+  assert.equal(sent[2]?.text, 'c')
+  assert.equal(sent[3]?.text, 'd')
+  // The third send had to wait for the first window slot to roll (~60s).
+  assert.ok(sleeps.some((ms) => ms >= 50_000), 'waits for the oldest send to leave the window')
+})
+
+test('window budget resets naturally across windows (sliding)', async () => {
+  let now = 0
+  const sent: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    budget: { windowMs: 60_000, maxPerWindow: 2 },
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms
+    },
+    send: async (e) => {
+      sent.push(e)
+      return { ok: true, messageId: 1 }
+    },
+  })
+  outbox.enqueue(entry({ text: 'a' }))
+  outbox.enqueue(entry({ text: 'b' }))
+  await outbox.drain()
+  assert.equal(sent.length, 2)
+  // Advance past the whole window, then two more sends are free again.
+  now += 120_000
+  outbox.enqueue(entry({ text: 'c' }))
+  outbox.enqueue(entry({ text: 'd' }))
+  await outbox.drain()
+  assert.equal(sent.length, 4)
+  assert.equal(sent[2]?.text, 'c')
+  assert.equal(sent[3]?.text, 'd')
+})

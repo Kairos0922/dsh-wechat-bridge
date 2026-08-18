@@ -28,8 +28,12 @@ export interface NodeConfig {
     rateLimitBackoffSecs?: number[];
     /** Full outbound pause after errcode -14 (session expired), minutes. */
     sessionExpiredPauseMin?: number;
-    /** Thinking-digest refresh interval while a turn is active (seconds). */
+    /** Liveness-digest interval while a turn is active (seconds). */
     thinkingDigestSec?: number;
+    /** Sliding-window send budget: max sends per window (server quota is not public). */
+    sendBudgetWindowSec?: number;
+    /** Sliding-window send budget: max sends per window (server quota is not public). */
+    sendBudgetMaxPerWindow?: number;
     /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
     typingHeartbeatSec?: number;
     /** Numbered choice menus expire after this (seconds). */

@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **长任务默认静音（2026-08-18 二次修复）**：实测发现服务器在会话窗口约 5-10 条
+  后触发发送风控（`prepare failed` 持续数分钟，tokenless 亦被拒），中间消息过多
+  正是导火索。产品决策：
+  - 中间工具叙述（assistant/message 非最终轮）不再推送微信，仅缓存；最终答案在
+    `turn/end` 一次送达（completed / max-tokens 均冲刷，aborted / error 不发）
+  - 出站滑动窗口预算：默认 60s 窗口最多 4 条（`sendBudgetWindowSec` /
+    `sendBudgetMaxPerWindow`），超限排队等待窗口滚动，**消息不丢只延迟**
+  - 执行中心跳降频降噪：`thinkingDigestSec` 默认 15s→120s，文案精简为
+    「🔄 仍在处理中 · 已调用 N 个工具 · 用时 M 分 S 秒」（工具名/思考字数不再推送）
+  - 最终答案以 system 优先级入队，确保先于「⏱ 用时」送达
+- 测试 120→124（窗口预算 2 项 + 静音冲刷管线 2 项）
+
+## [Unreleased]
+
 ### 修复
 
 - **出站断流根因修复（2026-08-18 事故，stale context_token）**：iLink 对过期

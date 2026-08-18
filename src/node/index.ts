@@ -33,8 +33,12 @@ export interface NodeConfig {
   rateLimitBackoffSecs?: number[]
   /** Full outbound pause after errcode -14 (session expired), minutes. */
   sessionExpiredPauseMin?: number
-  /** Thinking-digest refresh interval while a turn is active (seconds). */
+  /** Liveness-digest interval while a turn is active (seconds). */
   thinkingDigestSec?: number
+  /** Sliding-window send budget: max sends per window (server quota is not public). */
+  sendBudgetWindowSec?: number
+  /** Sliding-window send budget: max sends per window (server quota is not public). */
+  sendBudgetMaxPerWindow?: number
   /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
   typingHeartbeatSec?: number
   /** Numbered choice menus expire after this (seconds). */
@@ -83,8 +87,10 @@ export const Config: z<NodeConfig> = z.object({
   minSendIntervalMs: z.number().default(5_000),
   rateLimitBackoffSecs: z.array(z.number()).default([10, 30, 60]),
   sessionExpiredPauseMin: z.number().default(60),
-  thinkingDigestSec: z.number().default(10),
+  thinkingDigestSec: z.number().default(120),
   typingHeartbeatSec: z.number().default(25),
+  sendBudgetWindowSec: z.number().default(60),
+  sendBudgetMaxPerWindow: z.number().default(4),
   menuTimeoutSec: z.number().default(60),
   markdownMode: z.union(['passthrough', 'filter', 'plain']).default('passthrough'),
   progressToolPrefixes: z.array(z.string()).default([]),
@@ -114,7 +120,9 @@ function apply(ctx: Context, config: NodeConfig): void {
     minSendIntervalMs: config.minSendIntervalMs ?? 5_000,
     rateLimitBackoffSecs: config.rateLimitBackoffSecs ?? [10, 30, 60],
     sessionExpiredPauseMin: config.sessionExpiredPauseMin ?? 60,
-    thinkingDigestSec: config.thinkingDigestSec ?? 15,
+    thinkingDigestSec: config.thinkingDigestSec ?? 120,
+    sendBudgetWindowSec: config.sendBudgetWindowSec ?? 60,
+    sendBudgetMaxPerWindow: config.sendBudgetMaxPerWindow ?? 4,
     typingHeartbeatSec: config.typingHeartbeatSec ?? 25,
     menuTimeoutSec: config.menuTimeoutSec ?? 60,
     markdownMode: config.markdownMode ?? 'passthrough',

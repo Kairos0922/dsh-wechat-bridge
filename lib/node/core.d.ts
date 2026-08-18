@@ -40,6 +40,10 @@ export interface ResolvedNodeConfig {
     minSendIntervalMs: number;
     /** Escalating pause steps after errcode -12 (rate limit). */
     rateLimitBackoffSecs: number[];
+    /** Sliding-window send budget window (ms). */
+    sendBudgetWindowSec: number;
+    /** Sliding-window send budget: max sends per window. */
+    sendBudgetMaxPerWindow: number;
     /** Full outbound pause after errcode -14 (session expired). */
     sessionExpiredPauseMin: number;
     /** How often the thinking digest refreshes while a turn is active (sec). */

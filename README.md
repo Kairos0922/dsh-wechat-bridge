@@ -14,7 +14,7 @@
 - **上下文透明**：每轮结束附上下文用量（`🧮 12.0k / 32.0k`），接近上限提示自动压缩并建议 `/new`；自动压缩发生时主动告知
 - **可打断**：执行中回复「停 / 停止 / 算了」立即取消，停止后附进度摘要与 `/retry` 引导；断线恢复自动通知
 - **安全边界**：白名单外的消息只记日志、绝不喂给模型（可选 `notifyRejected` 提醒）；危险操作经审批，在微信里回复 `/yes` `/no` 或编号即可决定
-- **工程化底座**：限流感知出站队列（自动退避）、typing 缓存、断线重连、持久化去重、崩溃可恢复、媒体失败不静默
+- **工程化底座**：限流感知出站队列（窗口预算 + 自动退避）、typing 缓存、断线重连、持久化去重、崩溃可恢复、媒体失败不静默
 - **Web 设置面板**：扫码配对、白名单、模式一览、桥内偏好（模型/工作区）、出站队列状态——不用碰终端
 
 ## 快速开始
@@ -85,7 +85,8 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `approvalTimeoutSec` | 600 | 审批等待超时（超时默认拒绝） |
 | `notifyOnComplete` | false | 长任务完成时主动播报（仅私聊） |
 | `notifyRejected` | false | 陌生账号尝试联系时通知信任用户 |
-| `thinkingDigestSec` | 15 | 思考心跳刷新间隔（秒） |
+| `thinkingDigestSec` | 120 | 执行中「仍在处理」心跳间隔（秒，0=关闭） |
+| `sendBudgetWindowSec` / `sendBudgetMaxPerWindow` | 60 / 4 | 出站滑动窗口预算（每窗口最多条数，超限排队不丢弃） |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件，待用） |
 
 完整配置见插件源码 `src/node/index.ts` 的 `Config`。
@@ -102,14 +103,15 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 - **群聊**：iLink 机器人身份暂无法被拉入普通微信群（腾讯侧限制），`allowGroups` 已就绪待开放。
 - **工具进度卡片**：当前微信后端对卡片 item 静默丢弃，默认关闭（`progressToolPrefixes: []`），后端支持后填前缀即可启用。
 - **限流/会话过期**：微信通道无限流公开数字（`ret=-2` 的 errmsg 区分限流与 token 过期，见 `docs/protocol.md §5`）。
-  - 出站队列自适应退避（10s→30s→60s）；`prepare failed`（token 过期）自动做无 token 恢复重发，长任务不再断流。
+  - 出站队列自适应退避（10s→30s→60s）；`prepare failed`（token 过期）自动做无 token 恢复重发。
+  - **长任务默认静音**：中间工具叙述不再推送微信；最终答案在任务结束时一次送达；执行中仅低频「🔄 仍在处理中」心跳（120s）。
   - 审批提示发送失败不静默：用户下一条消息到达时自动重推（审批必达手机）。
   - 请勿高频连发（历史教训：连续探针触发过封禁）。
 
 ## 开发
 
 ```sh
-pnpm install && pnpm verify   # build → bundle → node --check → 120 项测试
+pnpm install && pnpm verify   # build → bundle → node --check → 124 项测试
 scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 ```
 

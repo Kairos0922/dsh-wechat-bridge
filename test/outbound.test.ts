@@ -84,3 +84,80 @@ test('buildContextUsageLine: reports tokens vs window and escalates near the lim
   const none = await buildContextUsageLine({ id: 'wechat-z', events: [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }] } as never, node as never)
   assert.equal(none, null)
 })
+
+// ---------------------------------------------------------------------------
+// Session-event digest pipeline: intermediate texts are silent; the final
+// answer is flushed at turn/end (product decision 2026-08-18).
+// ---------------------------------------------------------------------------
+
+import { WechatBridgeNode } from '../src/node/core.ts'
+import { attachSessionOutbound } from '../src/node/outbound.ts'
+
+const DIGEST_CONFIG = {
+  allowFrom: ['peer-a@im.wechat'],
+  approvalTimeoutSec: 600,
+  maxMessageChars: 2000,
+  minSendIntervalMs: 5000,
+  rateLimitBackoffSecs: [10, 30, 60],
+  sendBudgetWindowSec: 60,
+  sendBudgetMaxPerWindow: 4,
+  sessionExpiredPauseMin: 60,
+  thinkingDigestSec: 10,
+  typingHeartbeatSec: 0,
+  menuTimeoutSec: 60,
+  markdownMode: 'passthrough',
+  progressToolPrefixes: [],
+} as never
+
+function digestHarness() {
+  const handler: { current?: (session: unknown, event: unknown) => void } = {}
+  const ctx = {
+    logger: { warn() {}, info() {} },
+    get: () => undefined,
+    on: (_name: string, fn: (session: unknown, event: unknown) => void) => {
+      handler.current = fn
+      return () => {}
+    },
+    wechat: {
+      sendTypingIndicator: async () => {},
+    },
+  }
+  const node = new WechatBridgeNode(ctx as never, DIGEST_CONFIG)
+  const sent: Array<{ text: string; kind: string }> = []
+  node.enqueueText = ((_peer: string, text: string, opts: { kind?: string } = {}) => {
+    sent.push({ text, kind: opts.kind ?? 'text' })
+  }) as never
+  const disposer = attachSessionOutbound(node)
+  const session = { id: 'wechat-msx-test-1', events: [] }
+  return { node, sent, fire: (e: unknown) => handler.current?.(session as never, e), dispose: () => { disposer(); node.dispose() } }
+}
+
+test('intermediate assistant texts are NOT pushed; the final one is flushed at turn/end', async () => {
+  const h = digestHarness()
+  h.node.setActiveSession('peer-a@im.wechat', 'wechat-msx-test-1' as never)
+  const am = (text: string) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } })
+  h.fire({ type: 'turn/start', data: { turn: 1 } })
+  h.fire(am('工具中间叙述：数据到手'))
+  h.fire({ type: 'tool/call', data: { name: 'bash', callId: 'c1' } })
+  h.fire(am('又一条中间叙述'))
+  h.fire(am('最终答案：持仓诊断完成'))
+  h.fire({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  const texts = h.sent.filter((s) => s.kind === 'text').map((s) => s.text)
+  assert.equal(texts.includes('工具中间叙述：数据到手'), false, 'intermediate narration is silent')
+  assert.equal(texts.includes('又一条中间叙述'), false)
+  assert.ok(texts.some((t) => t.includes('最终答案：持仓诊断完成')), 'final answer flushed at turn/end')
+  h.dispose()
+})
+
+test('aborted turns do not flush the cached text (stop affordance only)', async () => {
+  const h = digestHarness()
+  h.node.setActiveSession('peer-a@im.wechat', 'wechat-msx-test-1' as never)
+  const am = (text: string) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } })
+  h.fire({ type: 'turn/start', data: { turn: 1 } })
+  h.fire(am('部分输出'))
+  h.fire({ type: 'turn/end', data: { reason: { kind: 'aborted' } } })
+  const texts = h.sent.map((s) => s.text)
+  assert.equal(texts.includes('部分输出'), false, 'aborted partial output is not pushed')
+  assert.ok(texts.some((t) => t.includes('已停止')), 'stop notice still sent')
+  h.dispose()
+})

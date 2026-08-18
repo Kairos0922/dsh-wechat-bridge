@@ -65,13 +65,23 @@ export interface OutboxOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
-  onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void
+  onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void
+  /**
+   * Sliding-window send budget: at most `maxPerWindow` sends in any
+   * `windowMs` span. Extra entries wait in the queue (never dropped) until
+   * the window rolls. The channel's server-side quota is NOT public — the
+   * 2026-08-18 incident showed ~5-10 sends per session window followed by
+   * `prepare failed` for minutes, so the client must throttle itself below
+   * whatever the server allows. Default: none (unlimited).
+   */
+  budget?: { windowMs: number; maxPerWindow: number }
 }
 
 export class Outbox {
   private readonly opts: Required<Pick<OutboxOptions, 'minIntervalMs' | 'backoffSecs' | 'sessionExpiredPauseMs' | 'send' | 'now' | 'sleep'>>
   private readonly onPause?: OutboxOptions['onPause']
   private readonly onDrop?: OutboxOptions['onDrop']
+  private readonly budget?: { windowMs: number; maxPerWindow: number }
   private queue: OutboxEntry[] = []
   private coalesced = new Map<string, OutboxEntry>()
   /** -Infinity: the first send needs no inter-message spacing. */
@@ -80,6 +90,8 @@ export class Outbox {
   private pausedUntil: number | null = null
   private pumping = false
   private disposed = false
+  /** Timestamps of sends inside the current budget window (sliding). */
+  private budgetSends: number[] = []
 
   constructor(opts: OutboxOptions) {
     this.opts = {
@@ -99,6 +111,7 @@ export class Outbox {
     }
     this.onPause = opts.onPause
     this.onDrop = opts.onDrop
+    this.budget = opts.budget
   }
 
   enqueue(entry: OutboxEntry): void {
@@ -180,9 +193,26 @@ export class Outbox {
           continue
         }
 
+        // Sliding-window budget: hold the head entry (never drop) until a
+        // budget slot frees up — the server's per-window quota is not public,
+        // so the client throttles itself conservatively (see protocol.md §8).
+        if (this.budget) {
+          const now = this.opts.now()
+          const windowStart = now - this.budget.windowMs
+          this.budgetSends = this.budgetSends.filter((ts) => ts >= windowStart)
+          if (this.budgetSends.length >= this.budget.maxPerWindow) {
+            const wait = this.budgetSends[0]! + this.budget.windowMs - now
+            if (wait > 0) {
+              await this.opts.sleep(wait)
+              continue
+            }
+          }
+        }
+
         this.queue.shift()
         if (entry.coalesceKey !== undefined) this.coalesced.delete(entry.coalesceKey)
         this.lastSendAt = this.opts.now()
+        this.budgetSends.push(this.opts.now())
         let result: SendResult
         try {
           result = await this.opts.send(entry)

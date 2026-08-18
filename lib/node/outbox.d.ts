@@ -61,12 +61,25 @@ export interface OutboxOptions {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void;
-    onDrop?: (entry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void;
+    onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void;
+    /**
+     * Sliding-window send budget: at most `maxPerWindow` sends in any
+     * `windowMs` span. Extra entries wait in the queue (never dropped) until
+     * the window rolls. The channel's server-side quota is NOT public — the
+     * 2026-08-18 incident showed ~5-10 sends per session window followed by
+     * `prepare failed` for minutes, so the client must throttle itself below
+     * whatever the server allows. Default: none (unlimited).
+     */
+    budget?: {
+        windowMs: number;
+        maxPerWindow: number;
+    };
 }
 export declare class Outbox {
     private readonly opts;
     private readonly onPause?;
     private readonly onDrop?;
+    private readonly budget?;
     private queue;
     private coalesced;
     /** -Infinity: the first send needs no inter-message spacing. */
@@ -75,6 +88,8 @@ export declare class Outbox {
     private pausedUntil;
     private pumping;
     private disposed;
+    /** Timestamps of sends inside the current budget window (sliding). */
+    private budgetSends;
     constructor(opts: OutboxOptions);
     enqueue(entry: OutboxEntry): void;
     private sortQueue;

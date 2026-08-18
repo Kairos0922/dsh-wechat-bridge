@@ -24,7 +24,8 @@ import {
 import type { WechatBridgeNode } from './core.ts'
 import { renderForWechat } from './markdown.ts'
 import { writeExportFile } from './exports.ts'
-import { debugLog } from '../debug-log.ts'
+import { debugLog, debugLogEvent } from '../debug-log.ts'
+import { OUTBOX_PRIORITY } from './outbox.ts'
 
 // ---------------------------------------------------------------------------
 // Chunking
@@ -153,7 +154,7 @@ export async function sendTextToPeer(
   node: WechatBridgeNode,
   peerId: string,
   text: string,
-  opts: { kind?: 'system' | 'text' | 'progress'; coalesceKey?: string } = {},
+  opts: { kind?: 'system' | 'text' | 'progress'; coalesceKey?: string; priority?: number } = {},
 ): Promise<void> {
   if (!peerId) return
   const chunks = splitForWechat(text, node.resolved.maxMessageChars)
@@ -164,6 +165,7 @@ export async function sendTextToPeer(
     const labeled = chunks.length > 1 && kind === 'text' ? `(${i + 1}/${chunks.length})\n${chunk}` : chunk
     node.enqueueText(peerId, labeled, {
       kind,
+      priority: opts.priority,
       coalesceKey: opts.coalesceKey !== undefined && i === chunks.length - 1 ? opts.coalesceKey : undefined,
     })
   }
@@ -214,6 +216,36 @@ interface DigestState {
   cardedCalls: Map<string, string>
   /** When the current turn started, for completion notifications. */
   turnStartedAt: number
+  /**
+   * Latest assistant text — intermediate turns are NOT pushed to WeChat
+   * (tool narration is silent by product decision); the last text of a
+   * finished turn is flushed as the final answer at turn/end.
+   */
+  lastAssistantText: string | null
+}
+
+/**
+ * Deliver a final assistant text through the node (chunked, file-threshold
+ * aware). Shared by the turn/end flush and the file-fallback path.
+ */
+function deliverAssistantText(node: WechatBridgeNode, peer: string, sessionId: string, text: string): void {
+  const rendered = renderForWechat(text, node.resolved.markdownMode)
+  const threshold = node.resolved.fileThresholdChars
+  if (threshold > 0 && rendered.length > threshold) {
+    // Long answer → short digest text + full Markdown file attachment.
+    // The file entry carries the full text: a hard failure falls back to
+    // chunked text delivery (see core.dispatchOutboxEntry).
+    const { filePath, fileName } = writeExportFile(node, sessionId, text, 'answer')
+    // system priority: the final answer must land BEFORE the turn meta line
+    // (⏱ 用时) in the outbox, without losing the onDrop failure notice.
+    void sendTextToPeer(node, peer, `${rendered.slice(0, 180)}…\n\n📎 完整内容（${rendered.length} 字）见附件 ${fileName}`, {
+      kind: 'text',
+      priority: OUTBOX_PRIORITY.system,
+    })
+    node.enqueueMedia(peer, 'file', filePath, fileName, rendered)
+  } else {
+    void sendTextToPeer(node, peer, rendered, { kind: 'text', priority: OUTBOX_PRIORITY.system })
+  }
 }
 
 /**
@@ -264,19 +296,17 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       // and stays quiet afterwards (no progress = no spam).
       if (key === state.lastTickKey) return
       state.lastTickKey = key
+      // Minimal liveness signal — deliberately quiet: the user asked for
+      // fewer mid-task messages, but must always know the task is running.
+      // The WeChat-native "typing…" indicator (typingTimer) is the primary
+      // liveness signal; this digest only appears at a low frequency.
       const parts: string[] = []
-      // First tick of the turn: surface the stop affordance once (discoverability).
-      if (state.lastTickKey === '') parts.push('（回复 /stop 可停止）')
-      if (state.reasoningChars > 0) {
-        const excerpt = node.state.getPrefs(peer).thinking && state.lastReasoning ? `，最近: …${state.lastReasoning}` : ''
-        parts.push(`🤔 思考中…（${state.reasoningChars} 字${excerpt}）`)
-      } else {
-        parts.push('🤔 思考中…')
-      }
-      if (state.toolCount > 0) {
-        parts.push(`🛠 已调用 ${state.toolCount} 个工具${state.lastTool ? `（最近: ${toolLabel(state.lastTool)}）` : ''}`)
-      }
-      node.enqueueText(peer, parts.join('\n'), { kind: 'progress', coalesceKey: `think:${session.id}` })
+      if (state.lastTickKey === '') parts.push('🔄 仍在处理中（回复 /stop 可停止）')
+      else parts.push('🔄 仍在处理中')
+      if (state.toolCount > 0) parts.push(`已调用 ${state.toolCount} 个工具`)
+      const elapsed = state.turnStartedAt > 0 ? Math.round((Date.now() - state.turnStartedAt) / 1000) : 0
+      if (elapsed >= 60) parts.push(`用时 ${Math.floor(elapsed / 60)} 分 ${elapsed % 60} 秒`)
+      node.enqueueText(peer, parts.join(' · '), { kind: 'progress', coalesceKey: `think:${session.id}` })
     }, node.resolved.thinkingDigestSec * 1000)
     state.heartbeat.unref?.()
   }
@@ -290,10 +320,12 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       reasoningChars: 0,
       lastReasoning: '',
       toolCount: 0,
+      lastTool: undefined,
       todoHash: '',
       lastTickKey: '',
       cardedCalls: new Map<string, string>(),
       turnStartedAt: 0,
+      lastAssistantText: null,
     }
     digestState.set(session.id, state)
     debugLog({ event: 'session-event', session: session.id, type: event.type })
@@ -313,6 +345,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       state.todoHash = ''
       state.cardedCalls.clear()
       state.turnStartedAt = Date.now()
+      state.lastAssistantText = null
       if (!state.startedTurns.has(turn)) {
         state.startedTurns.add(turn)
         if (!group) {
@@ -387,20 +420,15 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     }
 
     if (event.type === 'assistant/message') {
+      // Product decision (2026-08-18): intermediate assistant texts (tool
+      // narration between tool calls) are NOT pushed to WeChat — they would
+      // flood the phone and burn the channel's send budget. The text is
+      // cached and only the LAST one of a finished turn is flushed as the
+      // final answer (see turn/end).
       const text = textOfAssistantMessage(event.data.message)
       if (text.trim()) {
-        const rendered = renderForWechat(text, node.resolved.markdownMode)
-        const threshold = node.resolved.fileThresholdChars
-        if (threshold > 0 && rendered.length > threshold) {
-          // Long answer → short digest text + full Markdown file attachment.
-          // The file entry carries the full text: a hard failure falls back to
-          // chunked text delivery (see core.dispatchOutboxEntry).
-          const { filePath, fileName } = writeExportFile(node, session.id, text, 'answer')
-          void sendTextToPeer(node, peer, `${rendered.slice(0, 180)}…\n\n📎 完整内容（${rendered.length} 字）见附件 ${fileName}`)
-          node.enqueueMedia(peer, 'file', filePath, fileName, rendered)
-        } else {
-          void sendTextToPeer(node, peer, rendered)
-        }
+        state.lastAssistantText = text
+        debugLogEvent({ event: 'assistant-text-cached', session: session.id, len: text.length })
       }
       return
     }
@@ -408,12 +436,20 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
     if (event.type === 'turn/end') {
       stopHeartbeat(state)
       if (!group) sendTyping(peer, 2)
+      const reason = event.data.reason
+      // Flush the final assistant text FIRST (result before the meta line).
+      // completed / max-tokens both deliver whatever was produced; aborted
+      // and error do not (their notices explain the outcome).
+      const finalText = state.lastAssistantText
+      state.lastAssistantText = null
+      if (!group && finalText && (reason.kind === 'completed' || reason.kind === 'max-tokens')) {
+        deliverAssistantText(node, peer, session.id, finalText)
+      }
       // Per-turn context usage: keep the user aware of how much of the
       // session window is consumed and when to start a fresh session.
       void buildContextUsageLine(session, node).then((line) => {
         if (line) node.enqueueText(peer, line, { kind: 'system' })
       })
-      const reason = event.data.reason
       if (reason.kind === 'error') {
         node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system' })
       } else if (reason.kind === 'aborted') {

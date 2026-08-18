@@ -49,6 +49,10 @@ export interface ResolvedNodeConfig {
   minSendIntervalMs: number
   /** Escalating pause steps after errcode -12 (rate limit). */
   rateLimitBackoffSecs: number[]
+  /** Sliding-window send budget window (ms). */
+  sendBudgetWindowSec: number
+  /** Sliding-window send budget: max sends per window. */
+  sendBudgetMaxPerWindow: number
   /** Full outbound pause after errcode -14 (session expired). */
   sessionExpiredPauseMin: number
   /** How often the thinking digest refreshes while a turn is active (sec). */
@@ -178,6 +182,13 @@ export class WechatBridgeNode {
       minIntervalMs: config.minSendIntervalMs,
       backoffSecs: config.rateLimitBackoffSecs,
       sessionExpiredPauseMs: config.sessionExpiredPauseMin * 60_000,
+      // The server's per-window send quota is not public; observed behavior
+      // (2026-08-18): ~5-10 sends per session window then prepare failed for
+      // minutes. Throttle ourselves below that so the server never rejects.
+      budget: {
+        windowMs: config.sendBudgetWindowSec * 1000,
+        maxPerWindow: config.sendBudgetMaxPerWindow,
+      },
       send: (entry) => this.dispatchOutboxEntry(entry),
       // Any message that exhausted its retry budget must not fail silently —
       // the user asked for it and gets a straight answer instead of a mystery.

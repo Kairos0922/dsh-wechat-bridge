@@ -19,6 +19,8 @@ const CONFIG = {
   maxMessageChars: 2000,
   minSendIntervalMs: 5000,
   rateLimitBackoffSecs: [10, 30, 60],
+  sendBudgetWindowSec: 60,
+  sendBudgetMaxPerWindow: 4,
   sessionExpiredPauseMin: 60,
   thinkingDigestSec: 10,
   menuTimeoutSec: 60,

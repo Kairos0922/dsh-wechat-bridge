@@ -28,6 +28,7 @@ export declare function textOfAssistantMessage(message: AssistantMessage): strin
 export declare function sendTextToPeer(node: WechatBridgeNode, peerId: string, text: string, opts?: {
     kind?: 'system' | 'text' | 'progress';
     coalesceKey?: string;
+    priority?: number;
 }): Promise<void>;
 /** Whether this tool gets its own progress card (long/high-risk tools only). */
 export declare function isProgressTool(node: WechatBridgeNode, name: string): boolean;
