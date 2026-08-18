@@ -105,13 +105,14 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 - **限流/会话过期**：微信通道无限流公开数字（`ret=-2` 的 errmsg 区分限流与 token 过期，见 `docs/protocol.md §5`）。
   - 出站队列自适应退避（10s→30s→60s）；`prepare failed`（token 过期）自动做无 token 恢复重发。
   - **长任务默认静音**：中间工具叙述不再推送微信；最终答案在任务结束时一次送达；执行中仅低频「🔄 仍在处理中」心跳（120s）。
+  - **关键消息必达**：审批提示、最终答案、出错/停止通知发送失败不放弃——通道恢复（你下一条消息）时自动补发。
   - 审批提示发送失败不静默：用户下一条消息到达时自动重推（审批必达手机）。
   - 请勿高频连发（历史教训：连续探针触发过封禁）。
 
 ## 开发
 
 ```sh
-pnpm install && pnpm verify   # build → bundle → node --check → 124 项测试
+pnpm install && pnpm verify   # build → bundle → node --check → 126 项测试
 scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 ```
 

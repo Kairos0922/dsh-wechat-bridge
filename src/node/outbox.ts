@@ -42,6 +42,14 @@ export interface OutboxEntry {
   createdAt: number
   /** Transport-level failures re-enqueue up to this many times. */
   retryCount?: number
+  /**
+   * MUST-DELIVER marker: if this entry is dropped (retries exhausted while
+   * the channel is down), its text is recorded for re-push on the peer's
+   * next inbound message (approval prompts, final answers, error/stop
+   * notices — see core.retryCriticalMessages). The channel is demonstrably
+   * alive exactly when the user speaks, so the resend lands.
+   */
+  resendOnRecovery?: boolean
 }
 
 export const OUTBOX_PRIORITY = { system: 10, text: 20, tool: 25, progress: 30 } as const

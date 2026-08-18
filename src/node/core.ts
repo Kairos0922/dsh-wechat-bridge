@@ -101,6 +101,12 @@ export function newSessionId(): SessionId {
  */
 export const APPROVAL_COALESCE_PREFIX = 'approval:'
 
+/**
+ * Cap on MUST-DELIVER messages kept per peer for re-push after a channel
+ * outage — a long outage must not dump a wall of stale messages.
+ */
+export const CRITICAL_RESEND_CAP = 3
+
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export function buildWelcomeMessage(opts: { allowFromEmpty: boolean; defaultModeName: string | null }): string {
   const trust = opts.allowFromEmpty
@@ -161,6 +167,12 @@ export class WechatBridgeNode {
    * phone exactly then, and the channel is demonstrably alive.
    */
   private readonly approvalPromptDropped = new Set<string>()
+  /**
+   * MUST-DELIVER messages that were dropped while the channel was down
+   * (final answers, error/stop notices). Re-pushed on the peer's next
+   * inbound message, in order, up to CRITICAL_RESEND_CAP entries.
+   */
+  private readonly criticalDropped = new Map<string, Array<{ text: string; kind: OutboxEntryKind }>>()
   private disposers: Array<() => void> = []
 
   constructor(ctx: Context, config: ResolvedNodeConfig) {
@@ -196,14 +208,20 @@ export class WechatBridgeNode {
       // themselves notices, so notifying again would chain forever on a dead
       // channel.)
       onDrop: (entry, reason, result) => {
-        // An approval prompt that could not be delivered is NOT dropped for
-        // good: it is re-pushed the moment the user's next inbound message
-        // proves the channel recovered (see retryApprovalPrompt). Marking it
-        // here keeps the "审批必须到手机" guarantee without a success ack.
-        if (entry.coalesceKey?.startsWith(APPROVAL_COALESCE_PREFIX)) {
-          if (reason !== 'coalesced') {
-            this.approvalPromptDropped.add(entry.to ?? '')
-            debugLogEvent({ event: 'approval-prompt-dropped', peer: entry.to, reason })
+        // MUST-DELIVER messages (approval prompts, final answers, error/stop
+        // notices) are NOT dropped for good: they are re-pushed the moment
+        // the user's next inbound message proves the channel recovered
+        // (see retryApprovalPrompt / retryCriticalMessages). This is the
+        // "必须触达" guarantee without a success ack.
+        if (entry.resendOnRecovery) {
+          if (reason !== 'coalesced' && entry.to && entry.text) {
+            if (entry.coalesceKey?.startsWith(APPROVAL_COALESCE_PREFIX)) {
+              this.approvalPromptDropped.add(entry.to)
+              debugLogEvent({ event: 'approval-prompt-dropped', peer: entry.to, reason })
+            } else {
+              this.rememberCriticalDropped(entry.to, entry.text, entry.kind)
+              debugLogEvent({ event: 'critical-message-dropped', peer: entry.to, kind: entry.kind, reason })
+            }
           }
           return
         }
@@ -375,7 +393,7 @@ export class WechatBridgeNode {
   }
 
   /** Enqueue a text-ish bubble for a peer (chunking already applied by callers). */
-  enqueueText(peerId: string, text: string, opts: { kind?: OutboxEntryKind; priority?: number; coalesceKey?: string } = {}): void {
+  enqueueText(peerId: string, text: string, opts: { kind?: OutboxEntryKind; priority?: number; coalesceKey?: string; resendOnRecovery?: boolean } = {}): void {
     const trimmed = text.trim()
     if (!trimmed) return
     const kind = opts.kind ?? 'text'
@@ -386,6 +404,7 @@ export class WechatBridgeNode {
       to: peerId,
       text: trimmed,
       coalesceKey: opts.coalesceKey,
+      resendOnRecovery: opts.resendOnRecovery,
       createdAt: Date.now(),
     })
   }
@@ -399,14 +418,15 @@ export class WechatBridgeNode {
     this.enqueueText(peerId, text, {
       kind: 'system',
       coalesceKey: `${APPROVAL_COALESCE_PREFIX}${peerId}:${number}`,
+      resendOnRecovery: true,
     })
   }
 
   /**
    * Re-push the peer's pending approval prompt after a delivery failure —
    * called on the peer's next inbound message (channel recovered, user at
-   * the phone). No-op unless a prompt was actually dropped and the approval
-   * is still within its waiting window.
+   * the phone). No-op unless a prompt was actually dropped; re-pushes EVERY
+   * pending approval of the peer so concurrent requests stay visible.
    */
   retryApprovalPrompt(peerId: string): void {
     if (!this.approvalPromptDropped.has(peerId)) return
@@ -421,6 +441,34 @@ export class WechatBridgeNode {
     if (pushed > 0) {
       debugLogEvent({ event: 'approval-prompt-resent', peer: peerId, count: pushed })
     }
+  }
+
+  /** Record a MUST-DELIVER message for re-push on the peer's next inbound. */
+  private rememberCriticalDropped(peerId: string, text: string, kind: OutboxEntryKind): void {
+    const list = this.criticalDropped.get(peerId) ?? []
+    // De-duplicate identical retries (e.g. the same notice re-enqueued).
+    if (list.some((item) => item.text === text)) return
+    list.push({ text, kind })
+    // Cap the backlog: a long outage must not dump a wall of stale messages.
+    if (list.length > CRITICAL_RESEND_CAP) list.splice(0, list.length - CRITICAL_RESEND_CAP)
+    this.criticalDropped.set(peerId, list)
+  }
+
+  /**
+   * Re-push MUST-DELIVER messages that were dropped while the channel was
+   * down — called on the peer's next inbound message (the user is at the
+   * phone and the channel is demonstrably alive). Final answers, error/stop
+   * notices and the like land here; approval prompts have their own path
+   * (retryApprovalPrompt) so they can be rebuilt from live state.
+   */
+  retryCriticalMessages(peerId: string): void {
+    const list = this.criticalDropped.get(peerId)
+    if (!list || list.length === 0) return
+    this.criticalDropped.delete(peerId)
+    for (const item of list) {
+      this.enqueueText(peerId, item.text, { kind: item.kind, resendOnRecovery: true })
+    }
+    debugLogEvent({ event: 'critical-messages-resent', peer: peerId, count: list.length })
   }
 
   /** Enqueue a bot progress card item (TOOL_CALL_START / TOOL_CALL_RESULT). */

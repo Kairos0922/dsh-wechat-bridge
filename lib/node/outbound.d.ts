@@ -29,6 +29,7 @@ export declare function sendTextToPeer(node: WechatBridgeNode, peerId: string, t
     kind?: 'system' | 'text' | 'progress';
     coalesceKey?: string;
     priority?: number;
+    resendOnRecovery?: boolean;
 }): Promise<void>;
 /** Whether this tool gets its own progress card (long/high-risk tools only). */
 export declare function isProgressTool(node: WechatBridgeNode, name: string): boolean;

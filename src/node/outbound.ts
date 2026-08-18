@@ -154,7 +154,7 @@ export async function sendTextToPeer(
   node: WechatBridgeNode,
   peerId: string,
   text: string,
-  opts: { kind?: 'system' | 'text' | 'progress'; coalesceKey?: string; priority?: number } = {},
+  opts: { kind?: 'system' | 'text' | 'progress'; coalesceKey?: string; priority?: number; resendOnRecovery?: boolean } = {},
 ): Promise<void> {
   if (!peerId) return
   const chunks = splitForWechat(text, node.resolved.maxMessageChars)
@@ -167,6 +167,7 @@ export async function sendTextToPeer(
       kind,
       priority: opts.priority,
       coalesceKey: opts.coalesceKey !== undefined && i === chunks.length - 1 ? opts.coalesceKey : undefined,
+      resendOnRecovery: opts.resendOnRecovery,
     })
   }
 }
@@ -238,13 +239,16 @@ function deliverAssistantText(node: WechatBridgeNode, peer: string, sessionId: s
     const { filePath, fileName } = writeExportFile(node, sessionId, text, 'answer')
     // system priority: the final answer must land BEFORE the turn meta line
     // (⏱ 用时) in the outbox, without losing the onDrop failure notice.
+    // resendOnRecovery: the final answer is MUST-DELIVER — if the channel
+    // is down it is re-pushed on the user's next inbound message.
     void sendTextToPeer(node, peer, `${rendered.slice(0, 180)}…\n\n📎 完整内容（${rendered.length} 字）见附件 ${fileName}`, {
       kind: 'text',
       priority: OUTBOX_PRIORITY.system,
+      resendOnRecovery: true,
     })
     node.enqueueMedia(peer, 'file', filePath, fileName, rendered)
   } else {
-    void sendTextToPeer(node, peer, rendered, { kind: 'text', priority: OUTBOX_PRIORITY.system })
+    void sendTextToPeer(node, peer, rendered, { kind: 'text', priority: OUTBOX_PRIORITY.system, resendOnRecovery: true })
   }
 }
 
@@ -349,7 +353,7 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       if (!state.startedTurns.has(turn)) {
         state.startedTurns.add(turn)
         if (!group) {
-          node.enqueueText(peer, '⏳ 收到，开始处理…', { kind: 'system' })
+          node.enqueueText(peer, '⏳ 收到，开始处理…', { kind: 'system', resendOnRecovery: true })
           sendTyping(peer, 1)
         }
       }
@@ -451,15 +455,15 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
         if (line) node.enqueueText(peer, line, { kind: 'system' })
       })
       if (reason.kind === 'error') {
-        node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system' })
+        node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system', resendOnRecovery: true })
       } else if (reason.kind === 'aborted') {
         const progress =
           state.reasoningChars > 0 || state.toolCount > 0
             ? `（思考 ${state.reasoningChars} 字 · ${state.toolCount} 个工具调用）`
             : ''
-        node.enqueueText(peer, `⏹ 已停止${progress}\n回复 /retry 可重跑，或直接说新任务`, { kind: 'system' })
+        node.enqueueText(peer, `⏹ 已停止${progress}\n回复 /retry 可重跑，或直接说新任务`, { kind: 'system', resendOnRecovery: true })
       } else if (reason.kind === 'max-tokens') {
-        node.enqueueText(peer, '⚠️ 达到输出上限，本轮已截断（可回复“继续”让我接着完成）', { kind: 'system' })
+        node.enqueueText(peer, '⚠️ 达到输出上限，本轮已截断（可回复“继续”让我接着完成）', { kind: 'system', resendOnRecovery: true })
       }
       // Completion feedback: every finished turn reports elapsed time (and
       // tool count) so the user can gauge efficiency. Long tasks with the
@@ -476,10 +480,10 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
           node.enqueueText(
             peer,
             `✅ 任务完成（用时 ${seconds}s · ${state.toolCount} 个工具调用${state.reasoningChars > 0 ? ` · 思考 ${state.reasoningChars} 字` : ''}）`,
-            { kind: 'system' },
+            { kind: 'system', resendOnRecovery: true },
           )
         } else if (seconds !== null) {
-          node.enqueueText(peer, `⏱ 用时 ${seconds}s${tools}`, { kind: 'system' })
+          node.enqueueText(peer, `⏱ 用时 ${seconds}s${tools}`, { kind: 'system', resendOnRecovery: true })
         }
       }
       return

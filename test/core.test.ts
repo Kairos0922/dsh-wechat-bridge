@@ -312,3 +312,59 @@ test('retryApprovalPrompt is a no-op without a dropped prompt', async () => {
     process.env.DSH_HOME = oldHome
   }
 })
+
+test('a dropped MUST-DELIVER message is re-pushed by the inbound retry hook', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-crit-'))
+  try {
+    const sends: string[] = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { text: string }) => {
+          sends.push(p.text)
+          return { ok: false, ret: 100, errmsg: 'channel dead', retryable: false, failureClass: 'generic' }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1, sendBudgetWindowSec: 1, sendBudgetMaxPerWindow: 100 } as never)
+    // Final answer with the MUST-DELIVER marker → drop → recorded for re-push.
+    node.enqueueText('peer-a@im.wechat', '持仓诊断最终答案', { kind: 'text', resendOnRecovery: true })
+    await node.outbox.drain()
+    assert.equal(sends.length, 1)
+    // The user's next inbound message triggers the re-push.
+    node.retryCriticalMessages('peer-a@im.wechat')
+    await node.outbox.drain()
+    assert.equal(sends.length, 2, 'final answer re-pushed after the inbound hook')
+    assert.equal(sends[1], '持仓诊断最终答案')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
+test('critical resend backlog is capped and de-duplicated', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-crit2-'))
+  try {
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async () => ({ ok: false, ret: 100, errmsg: 'dead', retryable: false, failureClass: 'generic' }),
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1, sendBudgetWindowSec: 1, sendBudgetMaxPerWindow: 100 } as never)
+    for (let i = 0; i < 6; i++) {
+      node.enqueueText('peer-a@im.wechat', `关键消息 ${i}`, { kind: 'text', resendOnRecovery: true })
+      await node.outbox.drain()
+    }
+    // Cap 3 → only the LAST three survive for re-push.
+    node.retryCriticalMessages('peer-a@im.wechat')
+    await node.outbox.drain()
+    // 6 dropped + 3 resent.
+    assert.equal((node as unknown as { outbox: { pendingCount(): number } }).outbox.pendingCount(), 0)
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})

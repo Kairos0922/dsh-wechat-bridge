@@ -90,6 +90,11 @@ export declare function newSessionId(): SessionId;
  * still-queued copy instead of duplicating (coalesce semantics).
  */
 export declare const APPROVAL_COALESCE_PREFIX = "approval:";
+/**
+ * Cap on MUST-DELIVER messages kept per peer for re-push after a channel
+ * outage — a long outage must not dump a wall of stale messages.
+ */
+export declare const CRITICAL_RESEND_CAP = 3;
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export declare function buildWelcomeMessage(opts: {
     allowFromEmpty: boolean;
@@ -133,6 +138,12 @@ export declare class WechatBridgeNode {
      * phone exactly then, and the channel is demonstrably alive.
      */
     private readonly approvalPromptDropped;
+    /**
+     * MUST-DELIVER messages that were dropped while the channel was down
+     * (final answers, error/stop notices). Re-pushed on the peer's next
+     * inbound message, in order, up to CRITICAL_RESEND_CAP entries.
+     */
+    private readonly criticalDropped;
     private disposers;
     constructor(ctx: Context, config: ResolvedNodeConfig);
     /** Mount the bridge: outbound digest, approval answerer, inbound gate. */
@@ -146,6 +157,7 @@ export declare class WechatBridgeNode {
         kind?: OutboxEntryKind;
         priority?: number;
         coalesceKey?: string;
+        resendOnRecovery?: boolean;
     }): void;
     /**
      * Enqueue an approval prompt with the approval coalesce key — a newer
@@ -156,10 +168,20 @@ export declare class WechatBridgeNode {
     /**
      * Re-push the peer's pending approval prompt after a delivery failure —
      * called on the peer's next inbound message (channel recovered, user at
-     * the phone). No-op unless a prompt was actually dropped and the approval
-     * is still within its waiting window.
+     * the phone). No-op unless a prompt was actually dropped; re-pushes EVERY
+     * pending approval of the peer so concurrent requests stay visible.
      */
     retryApprovalPrompt(peerId: string): void;
+    /** Record a MUST-DELIVER message for re-push on the peer's next inbound. */
+    private rememberCriticalDropped;
+    /**
+     * Re-push MUST-DELIVER messages that were dropped while the channel was
+     * down — called on the peer's next inbound message (the user is at the
+     * phone and the channel is demonstrably alive). Final answers, error/stop
+     * notices and the like land here; approval prompts have their own path
+     * (retryApprovalPrompt) so they can be rebuilt from live state.
+     */
+    retryCriticalMessages(peerId: string): void;
     /** Enqueue a bot progress card item (TOOL_CALL_START / TOOL_CALL_RESULT). */
     enqueueToolCard(peerId: string, kind: 'tool-start' | 'tool-result', item: MessageItem): void;
     /** Enqueue a local file/image/video artifact for CDN upload + send. */
