@@ -95,6 +95,13 @@ export interface Config {
     sendBudgetWindowSec?: number;
     /** Sliding-window send budget: max sends per window. */
     sendBudgetMaxPerWindow?: number;
+    /**
+     * Server-side per-session-window send quota (protocol.md §5: ~10 sends per
+     * user inbound window, then `prepare failed` until the next inbound).
+     * Non-must entries beyond the quota are skipped; final answers / approvals
+     * / error notices are exempt. 0 disables accounting.
+     */
+    sessionWindowSendMax?: number;
     /** Directories `/video` may read from (default: cwd + media dir). */
     videoRoots?: string[];
     /** Extra trusted hosts for a server-provided baseUrl redirect (login/poll). */

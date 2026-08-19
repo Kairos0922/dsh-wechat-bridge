@@ -13,6 +13,7 @@ function makeOutbox(overrides: {
   minIntervalMs?: number
   now?: () => number
   sleep?: (ms: number) => Promise<void>
+  sessionWindowMax?: number
 } = {}) {
   const sent: OutboxEntry[] = []
   const results = overrides.results ?? []
@@ -20,6 +21,7 @@ function makeOutbox(overrides: {
     minIntervalMs: overrides.minIntervalMs ?? 10,
     backoffSecs: [10, 30, 60],
     sessionExpiredPauseMs: 60 * 60_000,
+    sessionWindowMax: overrides.sessionWindowMax,
     now: overrides.now,
     sleep: overrides.sleep,
     send: async (entry) => {
@@ -31,7 +33,7 @@ function makeOutbox(overrides: {
 }
 
 function entry(partial: Partial<OutboxEntry> & { createdAt?: number } = {}): OutboxEntry {
-  return { kind: 'text', priority: OUTBOX_PRIORITY.text, createdAt: 0, ...partial }
+  return { kind: 'text', priority: OUTBOX_PRIORITY.text, to: 'peer', createdAt: 0, ...partial }
 }
 
 test('sends in priority order, FIFO within a priority', async () => {
@@ -169,10 +171,10 @@ test('transport-level (retryable) failures re-enqueue and succeed on retry', asy
 
 test('ret=-2 (rate-limit class) backs off and delivers on recovery', async () => {
   // docs/protocol.md §5: ret=-2 is a rate-limit/session-class business error
-  // ("曾被误读为媒体形状被服务器拒绝——实际是限流/会话类业务错误"), NOT a
-  // permanent rejection. The outbox must pause (no hammering) and retry the
-  // entry, so a transient limit degrades to delayed delivery instead of the
-  // observed "卡住" (channel dead, subsequent messages silently dropped).
+  // ("曾被误读为媒体形状被服务器拒绝——实际是限流/会话类业务错误"). A TRUE
+  // rate limit ("rate limited" errmsg, no stale-session marker) is transient:
+  // the outbox must pause (no hammering) and retry the entry, so the limit
+  // degrades to delayed delivery instead of the observed "卡住".
   let now = 0
   const sleeps: number[] = []
   const sent: OutboxEntry[] = []
@@ -189,7 +191,7 @@ test('ret=-2 (rate-limit class) backs off and delivers on recovery', async () =>
     send: async (e) => {
       sent.push(e)
       attempts += 1
-      return attempts === 1 ? { ok: false, ret: -2, errmsg: 'prepare failed' } : { ok: true, messageId: 42 }
+      return attempts === 1 ? { ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=rate limited' } : { ok: true, messageId: 42 }
     },
   })
   outbox.enqueue(entry({ text: '任务计划' }))
@@ -218,13 +220,108 @@ test('ret=-2 retry budget exhausted drops with failed (not silent)', async () =>
       dropped.push(e)
       reasons.push(reason)
     },
-    send: async () => ({ ok: false, ret: -2, errmsg: 'prepare failed' }),
+    send: async () => ({ ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=rate limited' }),
   })
   outbox.enqueue(entry({ text: 'still down' }))
   await outbox.drain()
   assert.equal(dropped.length, 1)
   assert.equal(dropped[0]?.retryCount, OUTBOX_RATE_LIMIT_MAX_ATTEMPTS - 1, 'retried to the budget then dropped')
   assert.equal(reasons[0], 'failed')
+})
+
+test('stale-session (prepare failed) drops immediately: no retry, no queue pause', async () => {
+  // 2026-08-19 实测修正: `prepare failed` = the server's per-session-window
+  // send budget is spent. It does NOT self-heal (tokenless resend fails 5/5),
+  // so retrying/pausing only delays recovery — drop now, later entries must
+  // still be attempted immediately (their own failure routes them to the
+  // recovery resend list).
+  let now = 0
+  const sleeps: number[] = []
+  const sent: OutboxEntry[] = []
+  const dropped: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10, 30, 60],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      sleeps.push(ms)
+      now += ms
+    },
+    onDrop: (e) => dropped.push(e),
+    send: async (e) => {
+      sent.push(e)
+      return { ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=prepare failed', failureClass: 'stale-session' }
+    },
+  })
+  outbox.enqueue(entry({ text: 'final answer', priority: OUTBOX_PRIORITY.must, resendOnRecovery: true }))
+  outbox.enqueue(entry({ text: 'second must' }))
+  await outbox.drain()
+  assert.equal(sent.length, 2, 'both entries attempted exactly once — no retry churn')
+  assert.deepEqual(dropped.map((e) => e.text), ['final answer', 'second must'])
+  assert.ok(sleeps.every((ms) => ms < 60 * 60_000), 'no session pause/backoff waits')
+  assert.equal(outbox.getPausedUntil(), null, 'queue is never paused by stale-session')
+})
+
+test('session-window quota skips non-must entries once spent; must entries still send', async () => {
+  const dropped: Array<{ text?: string; reason: string }> = []
+  const sent: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    sessionWindowMax: 2,
+    sleep: () => Promise.resolve(),
+    onDrop: (e, reason) => dropped.push({ text: e.text, reason }),
+    send: async (e) => {
+      sent.push(e)
+      return { ok: true, messageId: 1 }
+    },
+  })
+  // Heartbeats fill the window…
+  outbox.enqueue(entry({ text: '心跳1', kind: 'progress', priority: OUTBOX_PRIORITY.progress }))
+  outbox.enqueue(entry({ text: '心跳2', kind: 'progress', priority: OUTBOX_PRIORITY.progress }))
+  await outbox.drain()
+  assert.equal(sent.length, 2)
+  // …a third heartbeat is skipped (quota), while the must answer still sends.
+  outbox.enqueue(entry({ text: '心跳3', kind: 'progress', priority: OUTBOX_PRIORITY.progress }))
+  outbox.enqueue(entry({ text: '最终答案', kind: 'text', priority: OUTBOX_PRIORITY.must, resendOnRecovery: true }))
+  await outbox.drain()
+  assert.deepEqual(sent.map((e) => e.text), ['心跳1', '心跳2', '最终答案'], 'window spent → heartbeats skipped, must exempt')
+  assert.deepEqual(dropped, [{ text: '心跳3', reason: 'quota' }])
+  assert.equal(outbox.windowRemaining('peer'), 0)
+})
+
+test('resetWindow re-opens the session window', async () => {
+  const sent: OutboxEntry[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 1,
+    backoffSecs: [10],
+    sessionExpiredPauseMs: 60 * 60_000,
+    sessionWindowMax: 2,
+    sleep: () => Promise.resolve(),
+    send: async (e) => {
+      sent.push(e)
+      return { ok: true, messageId: 1 }
+    },
+  })
+  outbox.enqueue(entry({ text: 'a' }))
+  outbox.enqueue(entry({ text: 'b' }))
+  outbox.enqueue(entry({ text: 'c' }))
+  await outbox.drain()
+  assert.equal(sent.length, 2, 'quota of 2: c is skipped')
+  outbox.resetWindow('peer')
+  outbox.enqueue(entry({ text: 'd' }))
+  await outbox.drain()
+  assert.deepEqual(sent.map((e) => e.text), ['a', 'b', 'd'], 'fresh window after reset')
+})
+
+test('must priority outranks system priority', async () => {
+  const { outbox, sent } = makeOutbox()
+  outbox.enqueue(entry({ kind: 'system', priority: OUTBOX_PRIORITY.system, text: '用时行', createdAt: 1 }))
+  outbox.enqueue(entry({ kind: 'text', priority: OUTBOX_PRIORITY.must, text: '最终答案', createdAt: 2 }))
+  await outbox.drain()
+  assert.deepEqual(sent.map((e) => e.text), ['最终答案', '用时行'])
 })
 
 test('non-ret=-2 server rejections (retryable === false) drop immediately', async () => {

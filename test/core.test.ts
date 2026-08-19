@@ -369,6 +369,79 @@ test('critical resend backlog is capped and de-duplicated', async () => {
   }
 })
 
+test('a dropped answer chunk re-pushes the WHOLE answer, re-chunked', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-pend-'))
+  try {
+    const sends: string[] = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { text: string }) => {
+          sends.push(p.text)
+          return { ok: false, ret: 100, errmsg: 'channel dead', retryable: false, failureClass: 'generic' }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, minSendIntervalMs: 1, sendBudgetWindowSec: 1, sendBudgetMaxPerWindow: 100 } as never)
+    const full = '完整答案第一段。'.repeat(30)
+    // The outbound path registers the whole answer alongside its chunks.
+    node.setPendingAnswer('peer-a@im.wechat', full, ['块甲', '块乙'])
+    // Only the LAST chunk's delivery fails.
+    node.enqueueText('peer-a@im.wechat', '(1/2)\n块甲', { kind: 'text', resendOnRecovery: true, priority: 5 })
+    await node.outbox.drain()
+    node.enqueueText('peer-a@im.wechat', '(2/2)\n块乙', { kind: 'text', resendOnRecovery: true, priority: 5 })
+    await node.outbox.drain()
+    // The peer's next inbound re-pushes the WHOLE answer, not just chunk 2.
+    node.retryCriticalMessages('peer-a@im.wechat')
+    await node.outbox.drain()
+    assert.equal(sends.length, 3)
+    assert.equal(sends[2], full, 'the full answer replaces the dropped chunk')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
+test('session-window quota skips do not enter the critical resend list', async () => {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-quota-'))
+  try {
+    const sends: string[] = []
+    const ctx = {
+      logger: { warn() {} },
+      wechat: {
+        sendText: async (p: { text: string }) => {
+          sends.push(p.text)
+          return { ok: true, messageId: 1 }
+        },
+      },
+    }
+    const node = new WechatBridgeNode(ctx as never, {
+      ...CONFIG,
+      minSendIntervalMs: 1,
+      sendBudgetWindowSec: 1,
+      sendBudgetMaxPerWindow: 100,
+      // Window budget of 2: the third non-must message is skipped, not failed.
+      sessionWindowSendMax: 2,
+    } as never)
+    node.enqueueText('peer-a@im.wechat', '心跳', { kind: 'progress' })
+    node.enqueueText('peer-a@im.wechat', '心跳', { kind: 'progress', coalesceKey: 'think:x' })
+    await node.outbox.drain()
+    assert.equal(sends.length, 2)
+    node.enqueueText('peer-a@im.wechat', '上下文行', { kind: 'system', resendOnRecovery: true })
+    await node.outbox.drain()
+    assert.equal(sends.length, 2, 'quota skip is not a send attempt')
+    // A quota skip is a stand-down, not a lost must-deliver message.
+    node.retryCriticalMessages('peer-a@im.wechat')
+    await node.outbox.drain()
+    assert.equal(sends.length, 2, 'nothing entered the critical resend list')
+    node.dispose()
+  } finally {
+    process.env.DSH_HOME = oldHome
+  }
+})
+
 // ---------------------------------------------------------------- trust admission
 
 function fakeAttachCtx(overrides: Record<string, unknown> = {}) {

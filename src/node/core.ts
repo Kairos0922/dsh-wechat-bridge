@@ -53,6 +53,13 @@ export interface ResolvedNodeConfig {
   sendBudgetWindowSec: number
   /** Sliding-window send budget: max sends per window. */
   sendBudgetMaxPerWindow: number
+  /**
+   * Server-side per-session-window send quota (~10 sends per user inbound
+   * window, protocol.md §5). Sends beyond it fail with `prepare failed`
+   * until the peer's next inbound message. Non-must entries are skipped once
+   * the window is spent; must entries are exempt. 0 disables accounting.
+   */
+  sessionWindowSendMax: number
   /** Full outbound pause after errcode -14 (session expired). */
   sessionExpiredPauseMin: number
   /** How often the thinking digest refreshes while a turn is active (sec). */
@@ -163,6 +170,18 @@ export class WechatBridgeNode {
   private readonly lastUserText = new Map<string, string>()
   private readonly pending = new Map<number, PendingApproval>()
   private approvalCounter = 0
+  /**
+   * Latest final-answer text per peer (with its WeChat chunks). When a chunk
+   * of it is dropped by the outbox, the WHOLE answer joins the recovery
+   * resend list — the peer must never get "(2/2)" without "(1/2)".
+   */
+  private readonly pendingAnswers = new Map<string, { full: string; chunks: string[] }>()
+  /**
+   * Peers whose whole answer already joined the recovery resend list after a
+   * chunk drop — further chunks of the SAME answer must not be appended
+   * individually (that would duplicate content on the re-push).
+   */
+  private readonly pendingAnswerRescued = new Set<string>()
   /** Per-sender serialization of inbound message handling (M9 race fix). */
   private readonly inboundChains = new Map<string, Promise<void>>()
   /**
@@ -205,6 +224,11 @@ export class WechatBridgeNode {
         windowMs: config.sendBudgetWindowSec * 1000,
         maxPerWindow: config.sendBudgetMaxPerWindow,
       },
+      // Server-side per-inbound-window send cap (protocol.md §5, 2026-08-19
+      // 实测): ~10 successful sends then `prepare failed` until the peer's
+      // next inbound message. The outbox skips non-must entries beyond the
+      // cap so heartbeats can never starve the final answer.
+      sessionWindowMax: config.sessionWindowSendMax,
       send: (entry) => this.dispatchOutboxEntry(entry),
       // Any message that exhausted its retry budget must not fail silently —
       // the user asked for it and gets a straight answer instead of a mystery.
@@ -212,6 +236,11 @@ export class WechatBridgeNode {
       // themselves notices, so notifying again would chain forever on a dead
       // channel.)
       onDrop: (entry, reason, result) => {
+        // 'quota': the peer's session window is spent — a SKIPPED non-must
+        // entry (heartbeat/todo/context line). Silent by design: retrying is
+        // pointless until the user's next inbound resets the window, and the
+        // window budget must stay reserved for must-tier messages.
+        if (reason === 'quota') return
         // MUST-DELIVER messages (approval prompts, final answers, error/stop
         // notices) are NOT dropped for good: they are re-pushed the moment
         // the user's next inbound message proves the channel recovered
@@ -223,8 +252,18 @@ export class WechatBridgeNode {
               this.approvalPromptDropped.add(entry.to)
               debugLogEvent({ event: 'approval-prompt-dropped', peer: entry.to, reason })
             } else {
-              this.rememberCriticalDropped(entry.to, entry.text, entry.kind)
-              debugLogEvent({ event: 'critical-message-dropped', peer: entry.to, kind: entry.kind, reason })
+              // A dropped chunk of a pending final answer re-pushes the WHOLE
+              // answer — the peer must never receive "(2/2)" without "(1/2)".
+              // Once rescued, later chunks of the same answer are dropped
+              // silently (the whole answer already sits in the resend list).
+              const full = this.takePendingAnswerForChunk(entry.to, entry.text)
+              if (full !== null) {
+                this.rememberCriticalDropped(entry.to, full, entry.kind)
+                debugLogEvent({ event: 'critical-message-dropped', peer: entry.to, kind: entry.kind, reason, wholeAnswer: true })
+              } else if (!this.pendingAnswerRescued.has(entry.to)) {
+                this.rememberCriticalDropped(entry.to, entry.text, entry.kind)
+                debugLogEvent({ event: 'critical-message-dropped', peer: entry.to, kind: entry.kind, reason })
+              }
             }
           }
           return
@@ -439,6 +478,38 @@ export class WechatBridgeNode {
   }
 
   /**
+   * Register the peer's latest final answer so a dropped chunk re-pushes the
+   * whole answer. `chunks` must be the exact WeChat delivery units (the same
+   * splitForWechat output the outbound path enqueues).
+   */
+  setPendingAnswer(peerId: string, full: string, chunks: string[]): void {
+    if (chunks.length > 1) this.pendingAnswers.set(peerId, { full, chunks })
+    else this.pendingAnswers.delete(peerId)
+    // A new answer resets the rescue marker of the previous one.
+    this.pendingAnswerRescued.delete(peerId)
+  }
+
+  /**
+   * If `chunkText` is one of the peer's pending answer chunks, consume the
+   * registration and return the WHOLE answer (for re-push); null otherwise.
+   * Chunks arrive labeled "(i/n)\n…" (or bare for single-chunk sends).
+   */
+  takePendingAnswerForChunk(peerId: string, chunkText: string): string | null {
+    const entry = this.pendingAnswers.get(peerId)
+    if (!entry) return null
+    const bare = chunkText.replace(/^\(\d+\/\d+\)\n/, '')
+    if (!entry.chunks.includes(bare)) return null
+    this.pendingAnswers.delete(peerId)
+    this.pendingAnswerRescued.add(peerId)
+    return entry.full
+  }
+
+  /** Sends still available in the peer's session window (outbox accounting). */
+  sessionWindowRemaining(peerId: string): number {
+    return this.outbox.windowRemaining(peerId)
+  }
+
+  /**
    * Enqueue an approval prompt with the approval coalesce key — a newer
    * prompt replaces a still-queued older one (never piles up), and a dropped
    * one is marked for re-push on the peer's next inbound message.
@@ -446,6 +517,9 @@ export class WechatBridgeNode {
   enqueueApprovalPrompt(peerId: string, text: string, number: number): void {
     this.enqueueText(peerId, text, {
       kind: 'system',
+      // MUST-DELIVER: approval prompts outrank everything and are exempt from
+      // the session-window quota — the user must always be able to say /yes.
+      priority: OUTBOX_PRIORITY.must,
       coalesceKey: `${APPROVAL_COALESCE_PREFIX}${peerId}:${number}`,
       resendOnRecovery: true,
     })
@@ -495,7 +569,18 @@ export class WechatBridgeNode {
     if (!list || list.length === 0) return
     this.criticalDropped.delete(peerId)
     for (const item of list) {
-      this.enqueueText(peerId, item.text, { kind: item.kind, resendOnRecovery: true })
+      // MUST-DELIVER tier: re-pushed answers/notices outrank the reply to the
+      // very message that unblocked the channel. Re-chunked so an oversized
+      // answer survives the resend.
+      const chunks = splitForWechat(item.text, this.resolved.maxMessageChars)
+      for (let i = 0; i < chunks.length; i++) {
+        const labeled = chunks.length > 1 && item.kind === 'text' ? `(${i + 1}/${chunks.length})\n${chunks[i]!}` : chunks[i]!
+        this.enqueueText(peerId, labeled, {
+          kind: item.kind,
+          priority: OUTBOX_PRIORITY.must,
+          resendOnRecovery: true,
+        })
+      }
     }
     debugLogEvent({ event: 'critical-messages-resent', peer: peerId, count: list.length })
   }
@@ -989,7 +1074,7 @@ export class WechatBridgeNode {
       return
     }
     agent.cancel({ kind: 'user' })
-    await sendTextToPeer(this, peerId, '⏹ 正在停止…', { kind: 'system' })
+    await sendTextToPeer(this, peerId, '⏹ 正在停止…', { kind: 'system', priority: OUTBOX_PRIORITY.must })
   }
 
   /** Route one inbound text: menus/approvals → commands → the active agent. */

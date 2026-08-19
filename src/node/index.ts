@@ -39,6 +39,13 @@ export interface NodeConfig {
   sendBudgetWindowSec?: number
   /** Sliding-window send budget: max sends per window (server quota is not public). */
   sendBudgetMaxPerWindow?: number
+  /**
+   * Server-side per-session-window send quota (protocol.md §5: ~10 sends per
+   * user inbound window, then `prepare failed` until the next inbound).
+   * Non-must entries beyond the quota are skipped; final answers / approvals
+   * / error notices are exempt. 0 disables accounting.
+   */
+  sessionWindowSendMax?: number
   /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
   typingHeartbeatSec?: number
   /** Numbered choice menus expire after this (seconds). */
@@ -98,6 +105,9 @@ export const Config: z<NodeConfig> = z.object({
   typingHeartbeatSec: z.number().min(0).default(25),
   sendBudgetWindowSec: z.number().min(1).default(60),
   sendBudgetMaxPerWindow: z.number().min(1).default(4),
+  // Observed server behavior (2026-08-18/19): ~10 successful sends per user
+  // inbound window, then `prepare failed` until the peer's next inbound.
+  sessionWindowSendMax: z.number().min(0).default(10),
   menuTimeoutSec: z.number().min(1).default(60),
   markdownMode: z.union(['passthrough', 'filter', 'plain']).default('passthrough'),
   progressToolPrefixes: z.array(z.string()).default([]),
@@ -133,6 +143,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     thinkingDigestSec: config.thinkingDigestSec ?? 120,
     sendBudgetWindowSec: config.sendBudgetWindowSec ?? 60,
     sendBudgetMaxPerWindow: config.sendBudgetMaxPerWindow ?? 4,
+    sessionWindowSendMax: config.sessionWindowSendMax ?? 10,
     typingHeartbeatSec: config.typingHeartbeatSec ?? 25,
     menuTimeoutSec: config.menuTimeoutSec ?? 60,
     markdownMode: config.markdownMode ?? 'passthrough',

@@ -44,6 +44,13 @@ export interface ResolvedNodeConfig {
     sendBudgetWindowSec: number;
     /** Sliding-window send budget: max sends per window. */
     sendBudgetMaxPerWindow: number;
+    /**
+     * Server-side per-session-window send quota (~10 sends per user inbound
+     * window, protocol.md §5). Sends beyond it fail with `prepare failed`
+     * until the peer's next inbound message. Non-must entries are skipped once
+     * the window is spent; must entries are exempt. 0 disables accounting.
+     */
+    sessionWindowSendMax: number;
     /** Full outbound pause after errcode -14 (session expired). */
     sessionExpiredPauseMin: number;
     /** How often the thinking digest refreshes while a turn is active (sec). */
@@ -134,6 +141,18 @@ export declare class WechatBridgeNode {
     private readonly lastUserText;
     private readonly pending;
     private approvalCounter;
+    /**
+     * Latest final-answer text per peer (with its WeChat chunks). When a chunk
+     * of it is dropped by the outbox, the WHOLE answer joins the recovery
+     * resend list — the peer must never get "(2/2)" without "(1/2)".
+     */
+    private readonly pendingAnswers;
+    /**
+     * Peers whose whole answer already joined the recovery resend list after a
+     * chunk drop — further chunks of the SAME answer must not be appended
+     * individually (that would duplicate content on the re-push).
+     */
+    private readonly pendingAnswerRescued;
     /** Per-sender serialization of inbound message handling (M9 race fix). */
     private readonly inboundChains;
     /**
@@ -163,6 +182,20 @@ export declare class WechatBridgeNode {
         coalesceKey?: string;
         resendOnRecovery?: boolean;
     }): void;
+    /**
+     * Register the peer's latest final answer so a dropped chunk re-pushes the
+     * whole answer. `chunks` must be the exact WeChat delivery units (the same
+     * splitForWechat output the outbound path enqueues).
+     */
+    setPendingAnswer(peerId: string, full: string, chunks: string[]): void;
+    /**
+     * If `chunkText` is one of the peer's pending answer chunks, consume the
+     * registration and return the WHOLE answer (for re-push); null otherwise.
+     * Chunks arrive labeled "(i/n)\n…" (or bare for single-chunk sends).
+     */
+    takePendingAnswerForChunk(peerId: string, chunkText: string): string | null;
+    /** Sends still available in the peer's session window (outbox accounting). */
+    sessionWindowRemaining(peerId: string): number;
     /**
      * Enqueue an approval prompt with the approval coalesce key — a newer
      * prompt replaces a still-queued older one (never piles up), and a dropped

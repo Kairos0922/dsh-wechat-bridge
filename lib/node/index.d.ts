@@ -34,6 +34,13 @@ export interface NodeConfig {
     sendBudgetWindowSec?: number;
     /** Sliding-window send budget: max sends per window (server quota is not public). */
     sendBudgetMaxPerWindow?: number;
+    /**
+     * Server-side per-session-window send quota (protocol.md §5: ~10 sends per
+     * user inbound window, then `prepare failed` until the next inbound).
+     * Non-must entries beyond the quota are skipped; final answers / approvals
+     * / error notices are exempt. 0 disables accounting.
+     */
+    sessionWindowSendMax?: number;
     /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
     typingHeartbeatSec?: number;
     /** Numbered choice menus expire after this (seconds). */

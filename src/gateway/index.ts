@@ -688,7 +688,23 @@ export class WechatGateway extends Service {
 
   private handleBatch(msgs: InboundMessage[]): void {
     for (const msg of msgs) {
-      if (msg.message_type !== MESSAGE_TYPE_USER) continue
+      // Observation (2026-08-19): does the server echo non-USER messages
+      // (the bot's own sends / system notices) carrying a FRESH
+      // context_token? If it does, the bridge could refresh the session
+      // window during long turns instead of waiting for the user's next
+      // inbound message. Log only token-bearing messages — they are the
+      // evidence that matters.
+      if (msg.message_type !== MESSAGE_TYPE_USER) {
+        if (msg.context_token) {
+          debugLogEvent({
+            event: 'poll-token-bearer',
+            messageType: msg.message_type,
+            token: redactContextToken(msg.context_token),
+            runId: msg.run_id ?? null,
+          })
+        }
+        continue
+      }
       const id = msg.message_id
       if (id !== undefined && id !== null) {
         if (this.seen.has(id)) continue
@@ -1003,7 +1019,11 @@ export class WechatGateway extends Service {
         status: params.status,
       })
     } catch (err) {
+      // Observation (2026-08-19): typing uses the separate sendTyping API —
+      // if it keeps failing while the session window is spent, the indicator
+      // shares the same session wall and cannot substitute for heartbeats.
       this.ctx.logger.debug('[dsh-wechat-bridge] typing indicator failed: %s', String(err))
+      debugLogEvent({ event: 'typing-failed', to: redactContextToken(params.toUserId), error: String(err).slice(0, 120) })
     }
   }
 }

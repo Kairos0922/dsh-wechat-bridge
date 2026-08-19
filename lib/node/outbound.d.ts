@@ -16,6 +16,13 @@
 import type { AssistantMessage } from '@deepseek-ai/dsh-llm';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { WechatBridgeNode } from './core.ts';
+/**
+ * Session-window quota reserve: heartbeats/todo snapshots stand down once the
+ * peer's remaining window budget drops to this many sends, so the server's
+ * ~10-send window cap is reserved for the must tier (final answer, approvals,
+ * error/stop notices).
+ */
+export declare const HEARTBEAT_QUOTA_RESERVE = 3;
 /** Collapse runs of blank lines to one; strips surrounding whitespace. */
 export declare function normalizeMarkdownBlocks(content: string): string;
 /** Split content into markdown blocks, keeping fenced code blocks intact. */

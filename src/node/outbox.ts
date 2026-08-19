@@ -59,7 +59,13 @@ export interface OutboxEntry {
   resendOnRecovery?: boolean
 }
 
-export const OUTBOX_PRIORITY = { system: 10, text: 20, tool: 25, progress: 30 } as const
+/**
+ * MUST-DELIVER tier: final answers, approval prompts, error/stop notices and
+ * critical re-pushes. Outranks everything, and is EXEMPT from the per-peer
+ * session-window send quota — the server's ~10-send window cap must never
+ * starve the messages the user explicitly asked for.
+ */
+export const OUTBOX_PRIORITY = { must: 5, system: 10, text: 20, tool: 25, progress: 30 } as const
 
 /** Max attempts (1 send + this many retries) for transport-level failures. */
 export const OUTBOX_MAX_ATTEMPTS = 3
@@ -80,7 +86,7 @@ export interface OutboxOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
-  onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void
+  onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota', result?: SendResult) => void
   /**
    * Sliding-window send budget: at most `maxPerWindow` sends in any
    * `windowMs` span. Extra entries wait in the queue (never dropped) until
@@ -90,6 +96,15 @@ export interface OutboxOptions {
    * whatever the server allows. Default: none (unlimited).
    */
   budget?: { windowMs: number; maxPerWindow: number }
+  /**
+   * Per-peer SESSION-window send quota (server-side hard cap, protocol.md §5:
+   * observed ~10 successful sends per user inbound window, then `prepare
+   * failed` until the peer's next inbound message). Non-must entries beyond
+   * the quota are SKIPPED (dropped 'quota', never delayed — the window only
+   * resets on inbound); must entries are exempt. resetWindow() re-opens the
+   * window. 0 disables the accounting.
+   */
+  sessionWindowMax?: number
 }
 
 export class Outbox {
@@ -97,6 +112,9 @@ export class Outbox {
   private readonly onPause?: OutboxOptions['onPause']
   private readonly onDrop?: OutboxOptions['onDrop']
   private readonly budget?: { windowMs: number; maxPerWindow: number }
+  private readonly sessionWindowMax: number
+  /** Successful sends per peer since the peer's last inbound (session window). */
+  private readonly windowCounts = new Map<string, number>()
   private queue: OutboxEntry[] = []
   private coalesced = new Map<string, OutboxEntry>()
   /** -Infinity: the first send needs no inter-message spacing. */
@@ -127,6 +145,21 @@ export class Outbox {
     this.onPause = opts.onPause
     this.onDrop = opts.onDrop
     this.budget = opts.budget
+    this.sessionWindowMax = opts.sessionWindowMax ?? 0
+  }
+
+  /**
+   * Re-open the peer's session window (call on every inbound message — the
+   * server grants a fresh ~10-send budget per user inbound).
+   */
+  resetWindow(to: string): void {
+    this.windowCounts.delete(to)
+  }
+
+  /** Sends still available in the peer's current session window. */
+  windowRemaining(to: string): number {
+    if (this.sessionWindowMax <= 0) return Number.POSITIVE_INFINITY
+    return Math.max(0, this.sessionWindowMax - (this.windowCounts.get(to) ?? 0))
   }
 
   enqueue(entry: OutboxEntry): void {
@@ -224,6 +257,24 @@ export class Outbox {
           }
         }
 
+        // Per-peer SESSION-window quota (protocol.md §5, 2026-08-19 实测):
+        // once the server's ~10-send budget for the peer's inbound window is
+        // spent, every further send fails with `prepare failed` until the
+        // peer's NEXT inbound message. Non-must entries are skipped outright
+        // (drop 'quota', never delayed — delaying is pointless, the window
+        // only resets on inbound). MUST-DELIVER entries are exempt: they
+        // always attempt their send; a stale-session failure routes them to
+        // the recovery resend list instead (see handleResult).
+        if (entry.to && this.sessionWindowMax > 0 && entry.priority > OUTBOX_PRIORITY.must) {
+          const used = this.windowCounts.get(entry.to) ?? 0
+          if (used >= this.sessionWindowMax) {
+            this.queue.shift()
+            if (entry.coalesceKey !== undefined) this.coalesced.delete(entry.coalesceKey)
+            this.onDrop?.(entry, 'quota')
+            continue
+          }
+        }
+
         this.queue.shift()
         if (entry.coalesceKey !== undefined) this.coalesced.delete(entry.coalesceKey)
         this.lastSendAt = this.opts.now()
@@ -256,6 +307,8 @@ export class Outbox {
    */
   private handleResult(entry: OutboxEntry, result: SendResult): boolean {
     if (result.ok) {
+      // A successful send consumes one slot of the peer's session window.
+      if (entry.to) this.windowCounts.set(entry.to, (this.windowCounts.get(entry.to) ?? 0) + 1)
       this.backoffIdx = 0
       return false
     }
@@ -274,8 +327,20 @@ export class Outbox {
       this.onDrop?.(entry, 'failed', result)
       return false
     }
-    // ret=-2 (errcode absent): the rate-limit/session-class business error —
-    // see docs/protocol.md §5 ("曾被误读为媒体形状被服务器拒绝——实际是限流/
+    // stale-session = the server's per-session-window send budget is spent
+    // (protocol.md §5; 2026-08-19 实测修正: tokenless resend fails 5/5 and
+    // the window does NOT self-heal — only the peer's next inbound resets
+    // it). Retrying/pausing here would only delay recovery: drop now, no
+    // pause, no backoff. MUST-DELIVER entries join the recovery resend list
+    // via onDrop and are re-pushed on the peer's next inbound message.
+    if (result.failureClass === 'stale-session') {
+      this.backoffIdx = 0
+      this.onDrop?.(entry, 'failed', result)
+      return false
+    }
+    // ret=-2 without a stale-session marker (e.g. "rate limited"/"freq
+    // limit"): the rate-limit/session-class business error — see
+    // docs/protocol.md §5 ("曾被误读为媒体形状被服务器拒绝——实际是限流/
     // 会话类业务错误"). NOT a permanent rejection: the channel needs a
     // cooldown, not a silent drop. Pause with escalating backoff and re-queue
     // the entry, so a transient limit degrades to delayed delivery instead of

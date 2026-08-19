@@ -5,6 +5,33 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **长任务出站静默根因修正（2026-08-19 实测）**：`prepare failed` 的归因从
+  "context_token 时效"修正为**会话窗口出站配额**——服务器对每个用户入站窗口
+  允许约 10 条成功出站（三次实测均恰好第 11 条失败），超出后一切发送失败且
+  tokenless 降级重发实测 5/5 不恢复，直到用户下一条入站消息重置窗口。原
+  "tokenless 恢复"机制（b4c3720）在窗口耗尽场景下无效。
+  - **must 最高优先级**（`OUTBOX_PRIORITY.must`，新增）：最终答案、审批提示、
+    出错/停止通知、critical 重推**豁免窗口配额**，永远尝试发送——服务器配额
+    永远优先保障用户明确要求的消息
+  - **窗口配额会计**（outbox）：per-peer 计数窗口内成功发送（入站重置，
+    `sessionWindowSendMax` 默认 10）；非 must 条目超配额直接跳过（drop 'quota'，
+    静默、不占队列）
+  - **心跳/todo 让位**（`HEARTBEAT_QUOTA_RESERVE=3`）：窗口剩余 ≤3 条时心跳与
+    todo 快照源头停发，配额留给最终答案；「正在输入」typing 指标（独立 API）
+    继续维持存活信号
+  - **stale-session 直弃**：`prepare failed` 不再退避重试 5 次、不再暂停队列
+    （实测不会自愈，重试只拖延恢复）；must 消息立即入恢复重推队列
+  - **答案整段重推**：多分块最终答案任一块失败时，整段文本入恢复重推队列，
+    用户下一条消息到达时重新分块补发（绝不出现只有 "(2/2)" 的残缺答案）
+  - 观测：`poll-token-bearer`（轮询中带 context_token 的非 USER 消息，探索
+    主动刷新路径）、`typing-failed`、`critical-message-dropped` 增加 wholeAnswer
+    标记
+  - 文档：docs/protocol.md §5/§6 按实测证据重写；README 已知限制更新
+  - 测试 220→226（窗口配额/重置/must 优先级/stale-session 直弃/整段重推/
+    配额跳过不进重推链）
+
 - **Security hardening**：开源前全量安全审计（5 维 ~60 项）后的集中修复，详见
   README「安全模型」。要点：
   - 设置面板端点补齐浏览器信任栅栏（Host 回环/声明主机 + Origin 同源 + 拒绝

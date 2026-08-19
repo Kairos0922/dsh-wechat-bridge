@@ -53,7 +53,14 @@ export interface OutboxEntry {
      */
     resendOnRecovery?: boolean;
 }
+/**
+ * MUST-DELIVER tier: final answers, approval prompts, error/stop notices and
+ * critical re-pushes. Outranks everything, and is EXEMPT from the per-peer
+ * session-window send quota — the server's ~10-send window cap must never
+ * starve the messages the user explicitly asked for.
+ */
 export declare const OUTBOX_PRIORITY: {
+    readonly must: 5;
     readonly system: 10;
     readonly text: 20;
     readonly tool: 25;
@@ -76,7 +83,7 @@ export interface OutboxOptions {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void;
-    onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed', result?: SendResult) => void;
+    onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota', result?: SendResult) => void;
     /**
      * Sliding-window send budget: at most `maxPerWindow` sends in any
      * `windowMs` span. Extra entries wait in the queue (never dropped) until
@@ -89,12 +96,24 @@ export interface OutboxOptions {
         windowMs: number;
         maxPerWindow: number;
     };
+    /**
+     * Per-peer SESSION-window send quota (server-side hard cap, protocol.md §5:
+     * observed ~10 successful sends per user inbound window, then `prepare
+     * failed` until the peer's next inbound message). Non-must entries beyond
+     * the quota are SKIPPED (dropped 'quota', never delayed — the window only
+     * resets on inbound); must entries are exempt. resetWindow() re-opens the
+     * window. 0 disables the accounting.
+     */
+    sessionWindowMax?: number;
 }
 export declare class Outbox {
     private readonly opts;
     private readonly onPause?;
     private readonly onDrop?;
     private readonly budget?;
+    private readonly sessionWindowMax;
+    /** Successful sends per peer since the peer's last inbound (session window). */
+    private readonly windowCounts;
     private queue;
     private coalesced;
     /** -Infinity: the first send needs no inter-message spacing. */
@@ -106,6 +125,13 @@ export declare class Outbox {
     /** Timestamps of sends inside the current budget window (sliding). */
     private budgetSends;
     constructor(opts: OutboxOptions);
+    /**
+     * Re-open the peer's session window (call on every inbound message — the
+     * server grants a fresh ~10-send budget per user inbound).
+     */
+    resetWindow(to: string): void;
+    /** Sends still available in the peer's current session window. */
+    windowRemaining(to: string): number;
     enqueue(entry: OutboxEntry): void;
     private sortQueue;
     pendingCount(): number;

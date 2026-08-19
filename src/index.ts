@@ -100,6 +100,13 @@ export interface Config {
   sendBudgetWindowSec?: number
   /** Sliding-window send budget: max sends per window. */
   sendBudgetMaxPerWindow?: number
+  /**
+   * Server-side per-session-window send quota (protocol.md §5: ~10 sends per
+   * user inbound window, then `prepare failed` until the next inbound).
+   * Non-must entries beyond the quota are skipped; final answers / approvals
+   * / error notices are exempt. 0 disables accounting.
+   */
+  sessionWindowSendMax?: number
   /** Directories `/video` may read from (default: cwd + media dir). */
   videoRoots?: string[]
   /** Extra trusted hosts for a server-provided baseUrl redirect (login/poll). */
@@ -137,6 +144,9 @@ export const Config: z<Config> = z.object({
   typingHeartbeatSec: z.number().min(0).default(25),
   sendBudgetWindowSec: z.number().min(1).default(60),
   sendBudgetMaxPerWindow: z.number().min(1).default(4),
+  // Observed server behavior (2026-08-18/19): ~10 successful sends per user
+  // inbound window, then `prepare failed` until the peer's next inbound.
+  sessionWindowSendMax: z.number().min(0).default(10),
   chromePath: z.string(),
   videoRoots: z.array(z.string()),
   baseUrl: z.string().default(ILINK_BASE_URL),
@@ -182,6 +192,7 @@ export function apply(ctx: Context, config: Config): void {
     typingHeartbeatSec: config.typingHeartbeatSec,
     sendBudgetWindowSec: config.sendBudgetWindowSec,
     sendBudgetMaxPerWindow: config.sendBudgetMaxPerWindow,
+    sessionWindowSendMax: config.sessionWindowSendMax,
     menuTimeoutSec: config.menuTimeoutSec,
     markdownMode: config.markdownMode,
     progressToolPrefixes: config.progressToolPrefixes,

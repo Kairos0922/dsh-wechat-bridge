@@ -101,36 +101,49 @@ media = {
 | 码 | 语义 | 处置 |
 |---|---|---|
 | `ret: 0` | 成功（ack；**不等于客户端已渲染**） | — |
-| `ret: -2` + `errmsg="prepare failed"` | **stale session（context_token 过期）**——长任务/久无互动后规律出现（2026-08-18 事故即此） | **会话过期恢复**：删除缓存 token → **无 token 重发一次**（iLink 接受降级发送）→ 仍失败则退避重试 |
-| `ret: -2` + `errmsg="unknown error"` | 同上（hermes 分类器同款） | 同上（会话过期恢复） |
+| `ret: -2` + `errmsg="prepare failed"` | **会话窗口出站配额耗尽**——服务器对每个"用户入站窗口"（自用户上一条入站消息起算）允许约 10 次成功出站，超出即 `prepare failed`，直到用户下一条入站消息重置窗口（2026-08-18 事故归因为 token 时效，**2026-08-19 三次实测修正为窗口配额模型**：每次窗口恰好第 11 条失败） | **立即弃投，不重试、不退避**：非 must 条目静默跳过（心跳/进度/上下文行），must 条目（最终答案/审批/错误通知）入恢复重推队列，用户下一条入站消息时重推（此时窗口已重置）。tokenless 重发**实测 5/5 失败**，不再作为恢复手段 |
+| `ret: -2` + `errmsg="unknown error"` | 同上（hermes 分类器同款） | 同上（会话窗口配额） |
 | `ret: -2` + `errmsg="rate limited"/"freq limit"`（及 -2 其他文本） | 限流（频率限制） | 退避重试（10s→30s→60s，预算 5 次） |
 | `errcode: -12` | 限流（官方 `RATE_LIMIT_ERRCODE`） | 同上退避 |
 | `errcode: -14` | 会话过期（`SESSION_EXPIRED_ERRCODE`） | 队列整体暂停 60min（对齐官方 session-guard） |
 | CDN `x-error-code` | CDN 侧校验失败（如 -5102031 = 内容非法） | 立即停止，不重试 |
 
 分类实现：`classifySendFailure()`（src/gateway/types.ts）→ `SendResult.failureClass`
-（`stale-session` / `rate-limit` / `session-expired` / `generic`）→ dispatch 层做
-tokenless 恢复（compare-and-delete 防并发刷新被误删），outbox 层做退避。
+（`stale-session` / `rate-limit` / `session-expired` / `generic`）→ dispatch 层保留
+一次 tokenless 尝试（best-effort），outbox 层按类处置：stale-session 立即弃投
+（不暂停队列），限流退避，-14 暂停。
 
-> **`prepare failed` / `unknown error` 同样进入会话过期恢复**（与 `-14` 同一恢复
-> 路径：tokenless 重发 + 退避，`-14` 额外暂停队列 60min），不是"服务器拒绝"终态——
-> 只读 errmsg 文本分派，禁止把 -2 当形状被拒。
+> **窗口配额模型（2026-08-19 实测证据，修正 08-18 的"token 时效"归因）**：
+> `prepare failed` 不是 token 时效也不是形状被拒——是**每用户入站窗口的出站
+> 发送预算**。实测三次完全一致：每次用户入站后恰好 10 条成功、第 11 条失败，
+> 失败持续到用户下一条入站消息（窗口重置）。桥端应对：
+> - **配额会计**：outbox 按 peer 计数窗口内成功发送（`sessionWindowSendMax`，
+>   默认 10），入站消息重置（`resetWindow`）；
+> - **must 豁免**：最终答案 / 审批提示 / 错误·停止通知 / critical 重推
+>   （`OUTBOX_PRIORITY.must`）不受配额限制，永远尝试发送；
+> - **非 must 让位**：心跳 / todo 快照 / 上下文行在窗口剩余 ≤3 时源头停发
+>   （`HEARTBEAT_QUOTA_RESERVE`），超配额后由 outbox 直接跳过（drop 'quota'）；
+> - **最终答案整段重推**：多分块答案任一块失败时，整段文本进入恢复重推队列，
+>   用户下一条入站消息到达即重新分块补发（绝不出现只有 "(2/2)" 的残缺答案）。
 
 > `ret: -2` 曾被误读为"媒体形状被服务器拒绝"——实际是限流/会话类业务错误
-> （openclaw 官方 issue #216 印证：连续媒体发送触发，paced 即成功；hermes
-> agent issue #17228 + PR #80426 确认 "prepare failed" = stale session）。
-> 一个数字两种含义，**必须读 errmsg 文本分派**。
+> （openclaw 官方 issue #216 印证：连续媒体发送触发，paced 即成功）。一个数字
+> 多种含义，**必须读 errmsg 文本 + failureClass 分派**。
 
 ## 6. context_token 语义
 
 - 入站消息携带服务器签发的 `context_token`；bridge 按用户持久化（state.json），
   出站回带，使回复关联到微信对话窗口。
 - **必须使用"当前入站消息"的 token，复用历史 token 会失效**（逆向文档与实测）；
-  长任务执行超过时效即触发 §5 的 "prepare failed"。
-- 会话过期（-14 / -2 + prepare failed / unknown error）时**去掉** context_token 重发
-  可恢复（iLink 接受 tokenless 降级发送；2026-08-18 起自动执行：compare-and-delete +
-  一次 tokenless 重发，不消耗出站重试预算，后续重试自然 tokenless）。
+  长任务执行超过窗口即触发 §5 的 "prepare failed"（窗口配额模型：token 与
+  ~10 条出站预算绑定，超出后同 token 的一切出站失败）。
+- **tokenless 降级实测不恢复**（2026-08-18/19 观测 5/5 失败——服务器不接受
+  无 token 发送作为窗口耗尽后的恢复手段）。恢复唯一路径：用户下一条入站消息
+  （携带新 token + 新窗口）。
 - 缺失/过期 context_token 是 ack 后"消息不投递"的已知因素之一，但不是投递充分条件。
+- **typing 指标**（独立 `sendTyping` API，不经 `sendMessage`）不消耗窗口配额，
+  窗口耗尽后仍可维持"正在输入"存活信号（2026-08-19 起观测验证中，
+  `typing-failed` 事件日志）。
 
 ## 7. 安全边界（bridge 强制）
 
