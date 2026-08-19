@@ -7,7 +7,10 @@
  * bindings make multi-friend routing deterministic: replies always return to
  * the peer that owns the active session, not whoever spoke last.
  *
- * Written atomically (tmp + rename) on a debounce; every timer unref'd.
+ * Written atomically (tmp + rename) on a debounce; writes are owner-only
+ * (0600 file / 0700 dir), existing files are self-healed to 0600 on load, and
+ * a failed write keeps the pending flag and retries with backoff. Every timer
+ * unref'd.
  *
  * @module dsh-wechat-bridge/node/state
  */
@@ -15,6 +18,38 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { resolveDshHome } from '../home.ts'
+
+/**
+ * A session id is always the bridge's own `wechat-` namespaced form (see
+ * `newSessionId()`: `wechat-<base36-ts>-<base36-rand>`). Anything else is
+ * untrusted garbage — M10 drops such entries at sanitize time instead of
+ * trusting them as routing keys.
+ */
+const SESSION_ID_RE = /^wechat-[0-9a-z-]+$/
+
+/**
+ * A peer id is a WeChat contact id string: non-empty, bounded, and free of
+ * control characters that could smuggle bytes into paths or log lines.
+ */
+const PEER_ID_MAX_LENGTH = 128
+const PEER_ID_FORBIDDEN_RE = /[\0\n\r]/
+
+function isSessionId(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_ID_RE.test(value)
+}
+
+function isPeerId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= PEER_ID_MAX_LENGTH &&
+    !PEER_ID_FORBIDDEN_RE.test(value)
+  )
+}
+
+/** Flush write-retry: 5s apart, at most 3 retries after the first failure. */
+const FLUSH_RETRY_DELAY_MS = 5_000
+const FLUSH_RETRY_MAX_ATTEMPTS = 3
 
 export interface BridgePrefs {
   /** Provider route for `/new` sessions (absent = deployment default). */
@@ -50,6 +85,18 @@ export interface BridgeStateData {
   /** sessionId → owning peer id (survives restart for reply routing). */
   sessionOwners: Record<string, string>
   /**
+   * sessionId → peer id that created it. Survives restart so `/close` and
+   * orphan handling can tell who may reclaim a session. Old state files
+   * simply lack the map — consumers treat an absent creator as 'legacy'
+   * (the state layer never writes a 'legacy' literal).
+   */
+  sessionCreators: Record<string, string>
+  /**
+   * Sessions released by `/close`: permanently ineligible for orphan
+   * adoption, even if the session still exists in the deployment.
+   */
+  releasedSessions: string[]
+  /**
    * peerId → latest iLink context token. The official client persists these
    * per account; without them, sends after a restart carry no context_token
    * and the WeChat client may not associate them to a conversation window.
@@ -64,11 +111,24 @@ export function defaultStateFile(): string {
 export interface BridgeStateOptions {
   file?: string
   debounceMs?: number
+  /** Delay between failed flush attempts (default 5s; at most 3 retries). */
+  retryMs?: number
+  /** Warn sink for non-fatal persistence issues (default console.warn). */
+  logger?: (message: string) => void
 }
 
 /** Validate an unknown JSON value into a usable state (never throws). */
 export function sanitizeState(value: unknown): BridgeStateData {
-  const base: BridgeStateData = { version: 1, peerPrefs: {}, pairedUserIds: [], peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+  const base: BridgeStateData = {
+    version: 1,
+    peerPrefs: {},
+    pairedUserIds: [],
+    peerSessions: {},
+    sessionOwners: {},
+    sessionCreators: {},
+    releasedSessions: [],
+    contextTokens: {},
+  }
   if (typeof value !== 'object' || value === null) return base
   const record = value as Record<string, unknown>
 
@@ -106,21 +166,35 @@ export function sanitizeState(value: unknown): BridgeStateData {
   const rawPaired = record.pairedUserIds
   if (Array.isArray(rawPaired)) {
     for (const id of rawPaired) {
-      if (typeof id === 'string' && id && !pairedUserIds.includes(id)) pairedUserIds.push(id)
+      if (isPeerId(id) && !pairedUserIds.includes(id)) pairedUserIds.push(id)
     }
   }
   const peerSessions: Record<string, string> = {}
   const rawPeers = record.peerSessions
   if (typeof rawPeers === 'object' && rawPeers !== null) {
     for (const [peer, session] of Object.entries(rawPeers as Record<string, unknown>)) {
-      if (typeof session === 'string' && session) peerSessions[peer] = session
+      if (isPeerId(peer) && isSessionId(session)) peerSessions[peer] = session
     }
   }
   const sessionOwners: Record<string, string> = {}
   const rawOwners = record.sessionOwners
   if (typeof rawOwners === 'object' && rawOwners !== null) {
     for (const [session, peer] of Object.entries(rawOwners as Record<string, unknown>)) {
-      if (typeof session === 'string' && typeof peer === 'string' && session && peer) sessionOwners[session] = peer
+      if (isSessionId(session) && isPeerId(peer)) sessionOwners[session] = peer
+    }
+  }
+  const sessionCreators: Record<string, string> = {}
+  const rawCreators = record.sessionCreators
+  if (typeof rawCreators === 'object' && rawCreators !== null) {
+    for (const [session, creator] of Object.entries(rawCreators as Record<string, unknown>)) {
+      if (isSessionId(session) && isPeerId(creator)) sessionCreators[session] = creator
+    }
+  }
+  const releasedSessions: string[] = []
+  const rawReleased = record.releasedSessions
+  if (Array.isArray(rawReleased)) {
+    for (const session of rawReleased) {
+      if (isSessionId(session) && !releasedSessions.includes(session)) releasedSessions.push(session)
     }
   }
   const contextTokens: Record<string, string> = {}
@@ -130,7 +204,16 @@ export function sanitizeState(value: unknown): BridgeStateData {
       if (typeof peer === 'string' && typeof token === 'string' && peer && token) contextTokens[peer] = token
     }
   }
-  return { version: 1, peerPrefs, pairedUserIds, peerSessions, sessionOwners, contextTokens }
+  return {
+    version: 1,
+    peerPrefs,
+    pairedUserIds,
+    peerSessions,
+    sessionOwners,
+    sessionCreators,
+    releasedSessions,
+    contextTokens,
+  }
 }
 
 export class BridgeState {
@@ -138,20 +221,61 @@ export class BridgeState {
   private readonly pairedUserIds = new Set<string>()
   private readonly file: string
   private readonly debounceMs: number
+  private readonly retryMs: number
+  private readonly warn: (message: string) => void
   private peerSessions = new Map<string, string>()
   private sessionOwners = new Map<string, string>()
+  private sessionCreators = new Map<string, string>()
+  private releasedSessions = new Set<string>()
   private contextTokens = new Map<string, string>()
 
   private timer: NodeJS.Timeout | null = null
+  private retryTimer: NodeJS.Timeout | null = null
+  private retryCount = 0
   private dirty = false
   private disposed = false
 
   constructor(opts: BridgeStateOptions = {}) {
     this.file = opts.file ?? defaultStateFile()
     this.debounceMs = opts.debounceMs ?? 3_000
-    let loaded: BridgeStateData = { version: 1, peerPrefs: {}, pairedUserIds: [], peerSessions: {}, sessionOwners: {}, contextTokens: {} }
+    this.retryMs = opts.retryMs ?? FLUSH_RETRY_DELAY_MS
+    this.warn = opts.logger ?? ((message: string) => console.warn(message))
+    let loaded: BridgeStateData = {
+      version: 1,
+      peerPrefs: {},
+      pairedUserIds: [],
+      peerSessions: {},
+      sessionOwners: {},
+      sessionCreators: {},
+      releasedSessions: [],
+      contextTokens: {},
+    }
     try {
-      loaded = sanitizeState(JSON.parse(fs.readFileSync(this.file, 'utf-8')) as unknown)
+      // Self-heal an existing state file to owner-only permissions (M7).
+      // chmod failure only warns: loading must never break because of it.
+      if (fs.existsSync(this.file)) {
+        try {
+          fs.chmodSync(this.file, 0o600)
+        } catch (error) {
+          this.warn(
+            `[dsh-wechat-bridge] could not tighten permissions on ${this.file}: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
+      }
+      const raw = fs.readFileSync(this.file, 'utf-8')
+      const parsed = JSON.parse(raw) as unknown
+      // Version tolerance (LOW): a missing version is treated as 1; any other
+      // version warns visibly but still loads the known fields — never reject,
+      // forward compatible.
+      if (typeof parsed === 'object' && parsed !== null) {
+        const version = (parsed as Record<string, unknown>).version
+        if (version !== undefined && version !== 1) {
+          this.warn(
+            `[dsh-wechat-bridge] state file ${this.file} has unsupported version ${String(version)} (expected 1); loading known fields only`,
+          )
+        }
+      }
+      loaded = sanitizeState(parsed)
     } catch {
       // absent or unreadable = fresh state; never fatal
     }
@@ -162,6 +286,8 @@ export class BridgeState {
     }
     this.peerSessions = new Map(Object.entries(loaded.peerSessions))
     this.sessionOwners = new Map(Object.entries(loaded.sessionOwners))
+    this.sessionCreators = new Map(Object.entries(loaded.sessionCreators))
+    for (const id of loaded.releasedSessions) this.releasedSessions.add(id)
     this.contextTokens = new Map(Object.entries(loaded.contextTokens))
   }
 
@@ -222,7 +348,29 @@ export class BridgeState {
     return [...this.contextTokens.entries()]
   }
 
+  /** The peer id that created a session (undefined = created before creators
+   * were tracked — consumers treat that as 'legacy'). */
+  getSessionCreator(sessionId: string): string | undefined {
+    return this.sessionCreators.get(sessionId)
+  }
 
+  setSessionCreator(sessionId: string, peerId: string): void {
+    if (this.sessionCreators.get(sessionId) !== peerId) {
+      this.sessionCreators.set(sessionId, peerId)
+      this.schedule()
+    }
+  }
+
+  /** Permanently mark a session as released by `/close` — never adoptable. */
+  markSessionReleased(sessionId: string): void {
+    if (this.releasedSessions.has(sessionId)) return
+    this.releasedSessions.add(sessionId)
+    this.schedule()
+  }
+
+  isSessionReleased(sessionId: string): boolean {
+    return this.releasedSessions.has(sessionId)
+  }
 
   /**
    * This peer's preferences: own bucket, falling back to the migrated legacy
@@ -244,9 +392,31 @@ export class BridgeState {
     return [...this.pairedUserIds]
   }
 
+  /** Forget a paired WeChat id (its session artifacts stay until cleared). */
+  removePairedUserId(userId: string): void {
+    if (this.pairedUserIds.delete(userId)) this.schedule()
+  }
+
   /** Whether this peer has any history (message context or session binding). */
   hasPeerHistory(peerId: string): boolean {
     return this.contextTokens.has(peerId) || this.peerSessions.has(peerId)
+  }
+
+  /**
+   * Remove every trace of a peer: its active-session binding, its context
+   * token, and every session it owns (cascade). Other peers are untouched.
+   */
+  clearPeerArtifacts(peerId: string): void {
+    let changed = false
+    if (this.peerSessions.delete(peerId)) changed = true
+    if (this.contextTokens.delete(peerId)) changed = true
+    for (const [session, owner] of [...this.sessionOwners.entries()]) {
+      if (owner === peerId) {
+        this.sessionOwners.delete(session)
+        changed = true
+      }
+    }
+    if (changed) this.schedule()
   }
 
   /**
@@ -289,6 +459,8 @@ export class BridgeState {
       pairedUserIds: [...this.pairedUserIds],
       peerSessions: Object.fromEntries(this.peerSessions),
       sessionOwners: Object.fromEntries(this.sessionOwners),
+      sessionCreators: Object.fromEntries(this.sessionCreators),
+      releasedSessions: [...this.releasedSessions],
       contextTokens: Object.fromEntries(this.contextTokens),
     }
   }
@@ -304,17 +476,34 @@ export class BridgeState {
     this.timer.unref?.()
   }
 
-  private flush(): void {
+  private flush(allowRetry = true): void {
     if (!this.dirty || this.disposed) return
-    this.dirty = false
     const tmp = `${this.file}.tmp`
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true })
-      fs.writeFileSync(tmp, JSON.stringify(this.toJSON(), null, 2), 'utf-8')
+      fs.mkdirSync(path.dirname(this.file), { mode: 0o700, recursive: true })
+      fs.writeFileSync(tmp, JSON.stringify(this.toJSON(), null, 2), { encoding: 'utf-8', mode: 0o600 })
       fs.renameSync(tmp, this.file)
+      // The pending flag drops only after the bytes are on disk: a crash or a
+      // failed write must never lose the fact that state changed (M8).
+      this.dirty = false
+      this.retryCount = 0
     } catch {
-      // best-effort persistence; in-memory state still governs this process
+      // Write failed: keep dirty so nothing is lost, then back off and retry
+      // (unref'd — never holds the process open). A fresh mutation re-triggers
+      // a debounced flush anyway, so retry exhaustion is not a dead end.
+      this.dirty = true
+      this.retryCount += 1
+      if (allowRetry && this.retryCount <= FLUSH_RETRY_MAX_ATTEMPTS) this.scheduleRetry()
     }
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer !== null) return
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      this.flush()
+    }, this.retryMs)
+    this.retryTimer.unref?.()
   }
 
   /** Flush pending writes and stop timers. */
@@ -323,7 +512,13 @@ export class BridgeState {
       clearTimeout(this.timer)
       this.timer = null
     }
-    this.flush()
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    // One last synchronous attempt. A failure keeps dirty=true and is not
+    // retried: the object is going away.
+    this.flush(false)
     this.disposed = true
   }
 }

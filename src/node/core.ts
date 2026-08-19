@@ -86,6 +86,8 @@ export interface ResolvedNodeConfig {
   notifyRejected: boolean
   /** Chrome binary path for the long-card renderer (auto-detected when unset). */
   chromePath?: string
+  /** Directories `/video` may read from (undefined = cwd + media dir defaults). */
+  videoRoots?: string[]
 }
 
 /** Default session id prefix for /new-created sessions. */
@@ -161,6 +163,8 @@ export class WechatBridgeNode {
   private readonly lastUserText = new Map<string, string>()
   private readonly pending = new Map<number, PendingApproval>()
   private approvalCounter = 0
+  /** Per-sender serialization of inbound message handling (M9 race fix). */
+  private readonly inboundChains = new Map<string, Promise<void>>()
   /**
    * Peers whose approval prompt failed to deliver (outbox drop). The prompt
    * is re-pushed on the peer's next inbound message — the user is at the
@@ -259,7 +263,13 @@ export class WechatBridgeNode {
     this.disposers.push(attachMediaRetention(this))
     this.disposers.push(
       this.ctx.on('wechat/message', (payload: InboundEvent) => {
-        void handleInbound(this, payload)
+        // Serialized per sender: two rapid messages must not race session
+        // resolution (both seeing "no active agent" → two sessions created,
+        // or an orphan adopted twice). Chain failures must not break the
+        // chain; an unexpected error is logged, never an unhandled rejection.
+        void this.enqueueInbound(payload.senderId ?? 'unknown', () => handleInbound(this, payload)).catch((err) => {
+          this.ctx.logger.warn('[dsh-wechat-bridge] inbound handling failed: %s', String(err))
+        })
       }),
     )
     // Back-online notice: after consecutive poll failures the gateway emits
@@ -274,36 +284,51 @@ export class WechatBridgeNode {
     )
     // First-run experience: a freshly confirmed pairing pushes a welcome
     // message straight into the pairer's chat — zero-config onboarding.
+    // Trust admission is gated: the first scanner (empty trust set) bootstraps
+    // automatically; further scanners are HELD for operator confirmation in
+    // the settings panel (see confirmPendingTrust / rejectPendingTrust).
     this.disposers.push(
       this.ctx.on('wechat/paired', (payload: { userId: string; accountId: string | null }) => {
         if (!payload.userId) return
-        // Scan = trust: every confirmed scanner joins the trusted set. A later
-        // scan never displaces an earlier one (multi-user 1:1).
-        this.state.addPairedUserId(payload.userId)
-        void this.modeDisplayName(this.resolved.defaultMode ?? '').then((name) => {
-          this.enqueueText(
-            payload.userId,
-            buildWelcomeMessage({
-              allowFromEmpty: this.resolved.allowFrom.length === 0,
-              defaultModeName: this.resolved.defaultMode ? name : null,
-            }),
-            { kind: 'system' },
-          )
+        void this.handlePairAdmission(payload.userId)
+      }),
+    )
+    // A DIFFERENT bot identity scanned while the old credentials still work:
+    // the gateway holds the switch until confirmed — auto-confirm only when
+    // the trust set is empty (first-run bootstrap keeps scan-and-go).
+    this.disposers.push(
+      this.ctx.on('wechat/pair-pending', () => {
+        void this.trustSetSize().then((size) => {
+          if (size === 0) void this.ctx.wechat.confirmPairing()
         })
       }),
     )
     // Migration: sessions created before per-peer binding (id prefix `wechat-`,
     // no owner) belong to the allowlisted peers without a binding yet — an
-    // upgrade never orphans an ongoing WeChat conversation. Newest-first
-    // distribution across the unbound peers.
+    // upgrade never orphans an ongoing WeChat conversation. Adoption rules
+    // (creator match, released exclusion, single-user legacy gate) apply here
+    // exactly as at runtime. Newest-first distribution across unbound peers.
     const unbound = this.resolved.allowFrom.filter((peerId) => !this.peerSessions.has(peerId))
     const orphans = listSessions(this).filter(
       (session) => session.id.startsWith('wechat-') && this.sessionOwners.get(session.id) === undefined,
     )
-    unbound.forEach((peerId, index) => {
-      const orphan = orphans[index]
-      if (orphan !== undefined) this.setActiveSession(peerId, orphan.id)
-    })
+    void (async () => {
+      try {
+        let orphanIndex = 0
+        for (const peerId of unbound) {
+          while (orphanIndex < orphans.length) {
+            const orphan = orphans[orphanIndex]!
+            orphanIndex += 1
+            if (await this.adoptable(orphan.id, peerId)) {
+              this.setActiveSession(peerId, orphan.id)
+              break
+            }
+          }
+        }
+      } catch (err) {
+        this.ctx.logger.warn('[dsh-wechat-bridge] orphan migration failed: %s', String(err))
+      }
+    })()
   }
 
   dispose(): void {
@@ -381,7 +406,11 @@ export class WechatBridgeNode {
       })
       // Graceful degradation: when the file channel fails outright, deliver the
       // full answer as chunked text instead of losing it behind a dead digest.
-      if (!result.ok && entry.text) {
+      // Fallback fires AT MOST ONCE per entry — after it, the file entry
+      // settles (see outbox handleResult) instead of duplicating the text on
+      // every transport retry.
+      if (!result.ok && entry.text && !entry.fallbackFired) {
+        entry.fallbackFired = true
         const chunks = splitForWechat(entry.text, this.resolved.maxMessageChars)
         for (const [index, chunk] of chunks.entries()) {
           this.enqueueText(entry.to ?? '', index === 0 ? chunk : chunk, { kind: 'text' })
@@ -585,6 +614,130 @@ export class WechatBridgeNode {
     return this.state.listPairedUserIds()
   }
 
+  // ---------------------------------------------------------------- trust set
+
+  /** The full trust set: configured allowFrom ∪ persisted paired scanners ∪ credential owner. */
+  private async trustSet(): Promise<Set<string>> {
+    const set = new Set<string>([...this.resolved.allowFrom, ...this.state.listPairedUserIds()])
+    const owner = await this.pairedUserId()
+    if (owner !== null) set.add(owner)
+    return set
+  }
+
+  /** Size of the trust set (used for pairing bootstrap and orphan guards). */
+  async trustSetSize(): Promise<number> {
+    return (await this.trustSet()).size
+  }
+
+  /**
+   * A scanner whose pairing the gateway confirmed but whose trust admission
+   * is held for operator confirmation in the settings panel (the trust set
+   * was non-empty at scan time — pairing ≠ blind trust anymore).
+   */
+  private pendingTrust: string | null = null
+
+  get pendingTrustUserId(): string | null {
+    return this.pendingTrust
+  }
+
+  /** Admit the held scanner into the persisted paired set. */
+  async confirmPendingTrust(): Promise<boolean> {
+    if (this.pendingTrust === null) return false
+    const userId = this.pendingTrust
+    this.pendingTrust = null
+    this.state.addPairedUserId(userId)
+    this.sendWelcome(userId)
+    return true
+  }
+
+  /**
+   * Trust admission for a confirmed scanner. Already-trusted re-scans are
+   * silent no-ops (credential refresh). The first-ever scanner bootstraps
+   * the trust set automatically. Everyone else waits for the operator.
+   */
+  private async handlePairAdmission(userId: string): Promise<void> {
+    const set = await this.trustSet()
+    if (set.has(userId)) return
+    if (set.size === 0) {
+      this.state.addPairedUserId(userId)
+      this.sendWelcome(userId)
+      return
+    }
+    this.pendingTrust = userId
+    this.ctx.logger.info('[dsh-wechat-bridge] scanner %s held for operator confirmation', userId)
+  }
+
+  private sendWelcome(userId: string): void {
+    void this.modeDisplayName(this.resolved.defaultMode ?? '').then((name) => {
+      this.enqueueText(
+        userId,
+        buildWelcomeMessage({
+          allowFromEmpty: this.resolved.allowFrom.length === 0,
+          defaultModeName: this.resolved.defaultMode ? name : null,
+        }),
+        { kind: 'system' },
+      )
+    })
+  }
+
+  /** Discard the held scanner (never trusted, nothing persisted). */
+  rejectPendingTrust(): boolean {
+    if (this.pendingTrust === null) return false
+    this.pendingTrust = null
+    return true
+  }
+
+  /** Operator revocation: unpair, drop the peer's bindings/tokens, tell them. */
+  async revokePairedUser(userId: string): Promise<boolean> {
+    if (!this.state.listPairedUserIds().includes(userId)) return false
+    this.state.removePairedUserId(userId)
+    this.state.clearPeerArtifacts(userId)
+    if (this.pendingTrust === userId) this.pendingTrust = null
+    this.peerSessions.delete(userId)
+    this.peerContextTokens.delete(userId)
+    this.enqueueText(userId, 'ℹ️ 你的配对已被操作者吊销，后续消息将不再被处理。', { kind: 'system' })
+    return true
+  }
+
+  // ------------------------------------------------- rejected-sender notices
+
+  /** Last notice time per stranger (per-sender cooldown). */
+  private readonly rejectedNoticeAt = new Map<string, number>()
+  private rejectedWindowStart = 0
+  private rejectedWindowCount = 0
+
+  /**
+   * Notify all trusted peers that a stranger messaged the bot — rate-limited:
+   * at most once per 10 min per stranger, at most 3 per 10 min globally.
+   * Without this, a spamming stranger would starve the shared outbox budget
+   * (system notices outrank answers) — the transparency feature must not
+   * become a denial-of-service amplifier.
+   */
+  notifyRejectedPeers(senderId: string): void {
+    if (!this.resolved.notifyRejected) return
+    const now = Date.now()
+    const WINDOW = 10 * 60_000
+    if (now - (this.rejectedNoticeAt.get(senderId) ?? 0) < WINDOW) return
+    if (now - this.rejectedWindowStart > WINDOW) {
+      this.rejectedWindowStart = now
+      this.rejectedWindowCount = 0
+    }
+    if (this.rejectedWindowCount >= 3) return
+    // Evict stale entries so a flood of unique strangers cannot grow the map.
+    if (this.rejectedNoticeAt.size > 1000) {
+      for (const [id, at] of this.rejectedNoticeAt) {
+        if (now - at >= WINDOW) this.rejectedNoticeAt.delete(id)
+      }
+      if (this.rejectedNoticeAt.size > 1000) this.rejectedNoticeAt.clear()
+    }
+    this.rejectedNoticeAt.set(senderId, now)
+    this.rejectedWindowCount += 1
+    const targets = new Set<string>([...this.resolved.allowFrom, ...this.state.listPairedUserIds()])
+    for (const peer of targets) {
+      this.enqueueText(peer, '👤 陌生账号尝试联系（已忽略，未进入任何会话）', { kind: 'system' })
+    }
+  }
+
   /** Set (and persist) the peer's active session. */
   setActiveSession(peerId: string, sessionId: SessionId | null): void {
     if (sessionId === null) {
@@ -601,6 +754,29 @@ export class WechatBridgeNode {
     this.sessionOwners.set(sessionId, peerId)
     this.state.setPeerSession(peerId, sessionId)
     this.state.setSessionOwner(sessionId, peerId)
+  }
+
+  /** Cleanup hooks fired when a session is released (e.g. digest state). */
+  private readonly sessionCleanupHooks = new Set<(sessionId: string) => void>()
+
+  /** Register a session-release cleanup hook; returns the unregister. */
+  registerSessionCleanup(fn: (sessionId: string) => void): () => void {
+    this.sessionCleanupHooks.add(fn)
+    return () => this.sessionCleanupHooks.delete(fn)
+  }
+
+  /**
+   * Release the peer's active session (/close): unbind and permanently
+   * exclude the session from orphan adoption — a closed session never
+   * silently changes hands to another peer later.
+   */
+  releaseSession(peerId: string): void {
+    const previous = this.peerSessions.get(peerId)
+    if (previous !== undefined) {
+      this.state.markSessionReleased(previous)
+      for (const fn of this.sessionCleanupHooks) fn(previous)
+    }
+    this.setActiveSession(peerId, null)
   }
 
   /** Sessions this peer owns, most-recent-first. */
@@ -776,6 +952,7 @@ export class WechatBridgeNode {
       })
       const session = handle.agent.session
       this.setActiveSession(peerId, session.id)
+      this.state.setSessionCreator(session.id, peerId)
       if (prompt) {
         this.rememberUserText(peerId, prompt)
         handle.agent.followup(
@@ -833,7 +1010,16 @@ export class WechatBridgeNode {
     }
     if (this.resolveApproval(text, peerId)) return
     if (this.tryResolveMenu(peerId, text)) return
-    const routed = await routeCommand(this, peerId, text)
+    let routed: Awaited<ReturnType<typeof routeCommand>>
+    try {
+      routed = await routeCommand(this, peerId, text)
+    } catch (err) {
+      // A failing command must surface as a reply, not as an unhandled
+      // rejection that silently swallows the user's message.
+      this.ctx.logger.warn('[dsh-wechat-bridge] command failed for %s: %s', peerId, String(err))
+      this.enqueueText(peerId, '❌ 命令执行出错，请稍后重试', { kind: 'system' })
+      return
+    }
     if (routed === 'handled') return
     const unescaped = routed === 'forward' ? text.replace(/^\/\//, '/') : text
     let agent = this.activeAgent(peerId)
@@ -902,6 +1088,23 @@ export class WechatBridgeNode {
     await this.ctx.agents.resume({ resumeSessionId: sessionId })
   }
 
+  /**
+   * Run inbound work for one sender strictly after the previous task for the
+   * same sender settled. A throwing task logs and does not poison the chain.
+   */
+  private enqueueInbound(peerId: string, task: () => Promise<void>): Promise<void> {
+    const prev = this.inboundChains.get(peerId) ?? Promise.resolve()
+    const next = prev.then(task, (err) => {
+      this.ctx.logger.warn('[dsh-wechat-bridge] inbound task failed for %s: %s', peerId, String(err))
+    })
+    this.inboundChains.set(peerId, next)
+    // Map hygiene: once the chain is empty again, drop the entry.
+    void next.finally(() => {
+      if (this.inboundChains.get(peerId) === next) this.inboundChains.delete(peerId)
+    })
+    return next
+  }
+
   /** User-facing mode name (falls back to the id when no display name). */
   private async modeDisplayName(modeId: string): Promise<string> {
     try {
@@ -921,14 +1124,35 @@ export class WechatBridgeNode {
    * or a prior session binding) may pick up an orphan. A brand-new user must
    * not inherit another user's closed/released session.
    */
+  /**
+   * Whether `peerId` may adopt the ownerless session `sessionId`. Rules:
+   * - sessions explicitly released via /close are NEVER adoptable;
+   * - a session is adoptable by its recorded creator;
+   * - a legacy session (no recorded creator, pre-migration) is adoptable only
+   *   when the whole trust set is ONE person (single-user upgrade path) and
+   *   that peer has own history. Multi-user deployments never hand one
+   *   peer's history to another.
+   */
+  private async adoptable(sessionId: string, peerId: string): Promise<boolean> {
+    if (this.state.isSessionReleased(sessionId)) return false
+    const creator = this.state.getSessionCreator(sessionId)
+    if (creator !== undefined) return creator === peerId
+    return (await this.trustSetSize()) === 1 && this.state.hasPeerHistory(peerId)
+  }
+
   private async pickOrphanSession(peerId: string): Promise<string | null> {
     if (!this.state.hasPeerHistory(peerId)) return null
     // Best-effort recovery: any failure here falls through to auto-create.
     try {
-      const live = listSessions(this).find(
-        (session) => session.id.startsWith('wechat-') && this.sessionOwners.get(session.id) === undefined,
-      )
-      if (live) return live.id
+      for (const session of listSessions(this)) {
+        if (
+          session.id.startsWith('wechat-') &&
+          this.sessionOwners.get(session.id) === undefined &&
+          (await this.adoptable(session.id, peerId))
+        ) {
+          return session.id
+        }
+      }
       const persistence = this.ctx.get('sessionPersistence') as
         | { list(): Promise<Array<{ id: string; createdAt: number }>> }
         | undefined
@@ -937,7 +1161,10 @@ export class WechatBridgeNode {
       const candidates = headers
         .filter((header) => header.id.startsWith('wechat-') && this.sessionOwners.get(header.id) === undefined)
         .sort((a, b) => b.createdAt - a.createdAt)
-      return candidates[0]?.id ?? null
+      for (const candidate of candidates) {
+        if (await this.adoptable(candidate.id, peerId)) return candidate.id
+      }
+      return null
     } catch {
       return null
     }
@@ -970,18 +1197,19 @@ export class WechatBridgeNode {
   resolveApproval(text: string, peerId: string): boolean {
     const entries = [...this.pending.entries()].filter(([, entry]) => entry.peerId === peerId)
     if (entries.length === 0) return false
+    const approvalText = text.trim()
     const outcome: ApprovalOutcome | undefined =
-      text === '/yes' ? 'allowed-once' : text === '/no' ? 'rejected' : undefined
+      approvalText === '/yes' ? 'allowed-once' : approvalText === '/no' ? 'rejected' : undefined
     if (outcome) {
       const [number, entry] = entries[entries.length - 1]!
       this.clearApproval(number)
       entry.resolve(outcome)
       return true
     }
-    if ((text === '1' || text === '2') && entries.length === 1) {
+    if ((approvalText === '1' || approvalText === '2') && entries.length === 1) {
       const [number, entry] = entries[0]!
       this.clearApproval(number)
-      entry.resolve(text === '1' ? 'allowed-once' : 'rejected')
+      entry.resolve(approvalText === '1' ? 'allowed-once' : 'rejected')
       return true
     }
     return false

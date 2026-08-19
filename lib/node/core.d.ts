@@ -80,6 +80,8 @@ export interface ResolvedNodeConfig {
     notifyRejected: boolean;
     /** Chrome binary path for the long-card renderer (auto-detected when unset). */
     chromePath?: string;
+    /** Directories `/video` may read from (undefined = cwd + media dir defaults). */
+    videoRoots?: string[];
 }
 /** Default session id prefix for /new-created sessions. */
 export declare function newSessionId(): SessionId;
@@ -132,6 +134,8 @@ export declare class WechatBridgeNode {
     private readonly lastUserText;
     private readonly pending;
     private approvalCounter;
+    /** Per-sender serialization of inbound message handling (M9 race fix). */
+    private readonly inboundChains;
     /**
      * Peers whose approval prompt failed to deliver (outbox drop). The prompt
      * is re-pushed on the peer's next inbound message — the user is at the
@@ -215,8 +219,54 @@ export declare class WechatBridgeNode {
     isAllowed(senderId: string): Promise<boolean>;
     /** All pairing-confirmed trusted WeChat ids (persisted). */
     listPairedUserIds(): string[];
+    /** The full trust set: configured allowFrom ∪ persisted paired scanners ∪ credential owner. */
+    private trustSet;
+    /** Size of the trust set (used for pairing bootstrap and orphan guards). */
+    trustSetSize(): Promise<number>;
+    /**
+     * A scanner whose pairing the gateway confirmed but whose trust admission
+     * is held for operator confirmation in the settings panel (the trust set
+     * was non-empty at scan time — pairing ≠ blind trust anymore).
+     */
+    private pendingTrust;
+    get pendingTrustUserId(): string | null;
+    /** Admit the held scanner into the persisted paired set. */
+    confirmPendingTrust(): Promise<boolean>;
+    /**
+     * Trust admission for a confirmed scanner. Already-trusted re-scans are
+     * silent no-ops (credential refresh). The first-ever scanner bootstraps
+     * the trust set automatically. Everyone else waits for the operator.
+     */
+    private handlePairAdmission;
+    private sendWelcome;
+    /** Discard the held scanner (never trusted, nothing persisted). */
+    rejectPendingTrust(): boolean;
+    /** Operator revocation: unpair, drop the peer's bindings/tokens, tell them. */
+    revokePairedUser(userId: string): Promise<boolean>;
+    /** Last notice time per stranger (per-sender cooldown). */
+    private readonly rejectedNoticeAt;
+    private rejectedWindowStart;
+    private rejectedWindowCount;
+    /**
+     * Notify all trusted peers that a stranger messaged the bot — rate-limited:
+     * at most once per 10 min per stranger, at most 3 per 10 min globally.
+     * Without this, a spamming stranger would starve the shared outbox budget
+     * (system notices outrank answers) — the transparency feature must not
+     * become a denial-of-service amplifier.
+     */
+    notifyRejectedPeers(senderId: string): void;
     /** Set (and persist) the peer's active session. */
     setActiveSession(peerId: string, sessionId: SessionId | null): void;
+    /** Cleanup hooks fired when a session is released (e.g. digest state). */
+    private readonly sessionCleanupHooks;
+    /** Register a session-release cleanup hook; returns the unregister. */
+    registerSessionCleanup(fn: (sessionId: string) => void): () => void;
+    /**
+     * Release the peer's active session (/close): unbind and permanently
+     * exclude the session from orphan adoption — a closed session never
+     * silently changes hands to another peer later.
+     */
+    releaseSession(peerId: string): void;
     /** Sessions this peer owns, most-recent-first. */
     sessionsForPeer(peerId: string): Session[];
     /** Remember the peer's latest context token (echoed on replies). */
@@ -251,6 +301,11 @@ export declare class WechatBridgeNode {
     handleText(peerId: string, text: string): Promise<void>;
     /** Resume a persisted session's agent (dsh-agent registry). */
     private resumeSession;
+    /**
+     * Run inbound work for one sender strictly after the previous task for the
+     * same sender settled. A throwing task logs and does not poison the chain.
+     */
+    private enqueueInbound;
     /** User-facing mode name (falls back to the id when no display name). */
     private modeDisplayName;
     /**
@@ -262,6 +317,16 @@ export declare class WechatBridgeNode {
      * or a prior session binding) may pick up an orphan. A brand-new user must
      * not inherit another user's closed/released session.
      */
+    /**
+     * Whether `peerId` may adopt the ownerless session `sessionId`. Rules:
+     * - sessions explicitly released via /close are NEVER adoptable;
+     * - a session is adoptable by its recorded creator;
+     * - a legacy session (no recorded creator, pre-migration) is adoptable only
+     *   when the whole trust set is ONE person (single-user upgrade path) and
+     *   that peer has own history. Multi-user deployments never hand one
+     *   peer's history to another.
+     */
+    private adoptable;
     private pickOrphanSession;
     nextApprovalNumber(): number;
     registerApproval(number: number, approval: PendingApproval): void;

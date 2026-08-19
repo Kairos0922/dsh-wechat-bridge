@@ -38,6 +38,13 @@ export interface OutboxEntry {
     /** Transport-level failures re-enqueue up to this many times. */
     retryCount?: number;
     /**
+     * Set once the file→text fallback fired during dispatch (core). Guard
+     * against duplicate degradation: retried file sends must not enqueue the
+     * fallback text a second time, and after the fallback the file entry
+     * itself settles (the text IS the delivery).
+     */
+    fallbackFired?: boolean;
+    /**
      * MUST-DELIVER marker: if this entry is dropped (retries exhausted while
      * the channel is down), its text is recorded for re-push on the peer's
      * next inbound message (approval prompts, final answers, error/stop

@@ -329,3 +329,65 @@ test('window budget resets naturally across windows (sliding)', async () => {
   assert.equal(sent[2]?.text, 'c')
   assert.equal(sent[3]?.text, 'd')
 })
+
+test('rate-limit (-12) drop surfaces through onDrop (recovery resend hook)', async () => {
+  let now = 0
+  const drops: Array<{ text?: string; reason: string }> = []
+  const outbox = new Outbox({
+    minIntervalMs: 10,
+    backoffSecs: [10, 30, 60],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms
+    },
+    send: async () => ({ ok: false, ret: -1, errcode: -12 }),
+    onDrop: (e, reason) => drops.push({ text: e.text, reason }),
+  })
+  outbox.enqueue(entry({ text: 'must-arrive', resendOnRecovery: true, kind: 'system', priority: OUTBOX_PRIORITY.system }))
+  await outbox.drain()
+  assert.deepEqual(drops, [{ text: 'must-arrive', reason: 'failed' }])
+})
+
+test('session-expiry (-14) drop surfaces through onDrop (recovery resend hook)', async () => {
+  let now = 0
+  const drops: Array<{ text?: string; reason: string }> = []
+  const outbox = new Outbox({
+    minIntervalMs: 10,
+    backoffSecs: [10, 30, 60],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms
+    },
+    send: async () => ({ ok: false, ret: -1, errcode: -14 }),
+    onDrop: (e, reason) => drops.push({ text: e.text, reason }),
+  })
+  outbox.enqueue(entry({ text: 'must-arrive', resendOnRecovery: true, kind: 'system', priority: OUTBOX_PRIORITY.system }))
+  await outbox.drain()
+  assert.deepEqual(drops, [{ text: 'must-arrive', reason: 'failed' }])
+})
+
+test('a file entry whose fallback already fired settles instead of retrying', async () => {
+  let now = 0
+  const sent: OutboxEntry[] = []
+  const drops: string[] = []
+  const outbox = new Outbox({
+    minIntervalMs: 10,
+    backoffSecs: [10, 30, 60],
+    sessionExpiredPauseMs: 60 * 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      now += ms
+    },
+    send: async (e) => {
+      sent.push(e)
+      return { ok: false, errmsg: 'transport down', retryable: true }
+    },
+    onDrop: (e, reason) => drops.push(reason),
+  })
+  outbox.enqueue(entry({ kind: 'file', media: { filePath: '/tmp/x.md', fileName: 'x.md' }, text: 'answer', fallbackFired: true }))
+  await outbox.drain()
+  assert.equal(sent.length, 1, 'the file is sent exactly once — no retry after the fallback')
+  assert.deepEqual(drops, ['failed'])
+})

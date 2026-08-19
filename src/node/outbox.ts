@@ -43,6 +43,13 @@ export interface OutboxEntry {
   /** Transport-level failures re-enqueue up to this many times. */
   retryCount?: number
   /**
+   * Set once the file→text fallback fired during dispatch (core). Guard
+   * against duplicate degradation: retried file sends must not enqueue the
+   * fallback text a second time, and after the fallback the file entry
+   * itself settles (the text IS the delivery).
+   */
+  fallbackFired?: boolean
+  /**
    * MUST-DELIVER marker: if this entry is dropped (retries exhausted while
    * the channel is down), its text is recorded for re-push on the peer's
    * next inbound message (approval prompts, final answers, error/stop
@@ -256,11 +263,15 @@ export class Outbox {
       this.pausedUntil = this.opts.now() + this.opts.sessionExpiredPauseMs
       this.backoffIdx = 0
       this.onPause?.(this.pausedUntil, 'session-expired')
+      // The entry settles here — dropped for now, but never silently:
+      // MUST-DELIVER entries join the recovery resend list via onDrop.
+      this.onDrop?.(entry, 'failed', result)
       return false
     }
     if (result.errcode === RATE_LIMIT_ERRCODE) {
       this.pausedUntil = this.opts.now() + this.nextBackoffSecs() * 1000
       this.onPause?.(this.pausedUntil, 'rate-limit')
+      this.onDrop?.(entry, 'failed', result)
       return false
     }
     // ret=-2 (errcode absent): the rate-limit/session-class business error —
@@ -282,9 +293,16 @@ export class Outbox {
       this.onDrop?.(entry, 'failed', result)
       return false
     }
-    // Generic failure. Transport-level (retryable) failures re-enqueue within
-    // the attempt budget; explicit server rejections (retryable === false)
-    // and exhausted budgets drop the entry.
+    // Generic failure. A file whose fallback already fired settles now —
+    // the degraded text is the delivery; retrying the file would duplicate.
+    if (entry.kind === 'file' && entry.fallbackFired) {
+      this.backoffIdx = 0
+      this.onDrop?.(entry, 'failed', result)
+      return false
+    }
+    // Transport-level (retryable) failures re-enqueue within the attempt
+    // budget; explicit server rejections (retryable === false) and exhausted
+    // budgets drop the entry.
     const attempts = (entry.retryCount ?? 0) + 1
     if (result.retryable !== false && attempts < OUTBOX_MAX_ATTEMPTS) {
       this.backoffIdx = 0

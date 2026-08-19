@@ -49,36 +49,55 @@ export function isMediaItem(item: MessageItem | undefined): boolean {
   return !!item && (item.type === ITEM_IMAGE || item.type === ITEM_VIDEO || item.type === ITEM_FILE || item.type === ITEM_VOICE)
 }
 
-export function bodyFromItemList(itemList?: MessageItem[]): string {
+/** Quoted-message recursion ceiling — a pathological ref chain must never blow the stack. */
+export const MAX_REF_DEPTH = 8
+
+export interface ExtractTextOptions {
+  /**
+   * Whether quoted-message bodies are included. Groups pass false: the quote
+   * may originate from a NON-allowlisted room member, and the allowlist gate
+   * only covers the current sender — quoted bodies from strangers must never
+   * reach the model context (the title, a short summary, is kept).
+   */
+  includeQuoteBody?: boolean
+}
+
+export function bodyFromItemList(itemList?: MessageItem[], opts: ExtractTextOptions = {}, depth = 0): string {
   if (!Array.isArray(itemList) || itemList.length === 0) return ''
+  const includeQuoteBody = opts.includeQuoteBody ?? true
+  const parts: string[] = []
   for (const item of itemList) {
     if (item?.type === ITEM_TEXT) {
       const text = String(item.text_item?.text ?? '')
       const ref = item.ref_msg
-      if (!ref) return text
-      // 引用的消息是媒体（图片/视频/文件/语音）时，只保留当前文本。
-      if (isMediaItem(ref.message_item)) return text
-      const parts: string[] = []
-      if (ref.title) parts.push(ref.title)
-      if (ref.message_item) {
-        const refBody = bodyFromItemList([ref.message_item])
-        if (refBody) parts.push(refBody)
+      // 引用的消息是媒体（图片/视频/文件/语音）或超出递归上限时，只保留当前文本。
+      if (!ref || depth >= MAX_REF_DEPTH || isMediaItem(ref.message_item)) {
+        if (text) parts.push(text)
+        continue
       }
-      if (parts.length === 0) return text
-      return `[引用: ${parts.join(' | ')}]\n${text}`
+      const refParts: string[] = []
+      if (ref.title) refParts.push(ref.title)
+      if (includeQuoteBody && ref.message_item) {
+        const refBody = bodyFromItemList([ref.message_item], opts, depth + 1)
+        if (refBody) refParts.push(refBody)
+      }
+      parts.push(refParts.length === 0 ? text : `[引用: ${refParts.join(' | ')}]\n${text}`)
+      continue
     }
     // 语音转写：语音消息带 text 字段时直接使用。
     if (item?.type === ITEM_VOICE) {
       const voiceText = String(item.voice_item?.text ?? '')
-      if (voiceText.trim()) return `[语音转写]\n${voiceText}`
+      if (voiceText.trim()) parts.push(`[语音转写]\n${voiceText}`)
     }
   }
-  return ''
+  // Aggregate ALL text fragments (multi-item messages must not silently lose
+  // everything past the first item — the debug log already logs them all).
+  return parts.filter(Boolean).join('\n')
 }
 
 /** Extract the visible text of an inbound message (text + quoted context + voice transcription). */
-export function extractText(message: InboundMessage): string {
-  return bodyFromItemList(message.item_list)
+export function extractText(message: InboundMessage, opts: ExtractTextOptions = {}): string {
+  return bodyFromItemList(message.item_list, opts)
 }
 
 /**
@@ -158,13 +177,9 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
         senderId,
       )
       // Optional transparency: tell trusted users a stranger tried to reach
-      // the bot (off by default — can be noisy under spam).
-      if (node.resolved.notifyRejected) {
-        const targets = new Set<string>([...node.resolved.allowFrom, ...node.state.listPairedUserIds()])
-        for (const peer of targets) {
-          node.enqueueText(peer, '👤 陌生账号尝试联系（已忽略，未进入任何会话）', { kind: 'system' })
-        }
-      }
+      // the bot (off by default — can be noisy under spam). Rate-limited in
+      // core so a spamming stranger cannot starve the shared outbox budget.
+      node.notifyRejectedPeers(senderId)
       return
     }
   }
@@ -172,7 +187,8 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   const images = (message.item_list ?? [])
     .filter((item) => item?.type === ITEM_IMAGE)
     .map((item) => item.image_item ?? {})
-  const text = extractText(message)
+  // Group quotes may carry a non-allowlisted member's text — strip the body.
+  const text = extractText(message, { includeQuoteBody: !groupId })
 
   node.setPeerTarget(peerKey, target)
   node.setPeerContextToken(peerKey, contextToken ?? null)

@@ -368,3 +368,211 @@ test('critical resend backlog is capped and de-duplicated', async () => {
     process.env.DSH_HOME = oldHome
   }
 })
+
+// ---------------------------------------------------------------- trust admission
+
+function fakeAttachCtx(overrides: Record<string, unknown> = {}) {
+  const handlers = new Map<string, (payload: never) => void>()
+  const ctx = {
+    logger: { warn() {}, info() {} },
+    get: () => undefined,
+    on: (name: string, fn: never) => {
+      handlers.set(name, fn)
+      return () => {}
+    },
+    sessions: { list: () => [], get: () => undefined },
+    ...overrides,
+  }
+  return { ctx, handlers }
+}
+
+function withTempHome(fn: () => Promise<void>): Promise<void> {
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-core-'))
+  return fn().finally(() => {
+    process.env.DSH_HOME = oldHome
+  })
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 20))
+
+test('pair admission: the first scanner bootstraps the trust set automatically', () =>
+  withTempHome(async () => {
+    const { ctx, handlers } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
+    node.attach()
+    handlers.get('wechat/paired')!({ userId: 'first@im.wechat' } as never)
+    await settle()
+    assert.ok(node.state.listPairedUserIds().includes('first@im.wechat'), 'bootstrap scanner joins the trust set')
+    assert.equal(node.pendingTrustUserId, null)
+    node.dispose()
+  }))
+
+test('pair admission: a second scanner is held until the operator confirms', () =>
+  withTempHome(async () => {
+    const { ctx, handlers } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: ['owner@im.wechat'] } as never)
+    node.attach()
+    handlers.get('wechat/paired')!({ userId: 'newbie@im.wechat' } as never)
+    await settle()
+    assert.ok(!node.state.listPairedUserIds().includes('newbie@im.wechat'), 'held, not trusted')
+    assert.equal(node.pendingTrustUserId, 'newbie@im.wechat')
+    assert.equal(await node.isAllowed('newbie@im.wechat'), false)
+    assert.equal(await node.confirmPendingTrust(), true)
+    assert.ok(node.state.listPairedUserIds().includes('newbie@im.wechat'))
+    assert.equal(await node.confirmPendingTrust(), false, 'no double confirm')
+    node.dispose()
+  }))
+
+test('pair admission: operator rejection never persists the scanner', () =>
+  withTempHome(async () => {
+    const { ctx, handlers } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: ['owner@im.wechat'] } as never)
+    node.attach()
+    handlers.get('wechat/paired')!({ userId: 'newbie@im.wechat' } as never)
+    await settle()
+    assert.equal(node.rejectPendingTrust(), true)
+    assert.ok(!node.state.listPairedUserIds().includes('newbie@im.wechat'))
+    assert.equal(node.pendingTrustUserId, null)
+    assert.equal(node.rejectPendingTrust(), false)
+    node.dispose()
+  }))
+
+test('pair admission: a re-scan by an already-trusted user is a silent no-op', () =>
+  withTempHome(async () => {
+    const { ctx, handlers } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: ['owner@im.wechat'] } as never)
+    node.attach()
+    handlers.get('wechat/paired')!({ userId: 'owner@im.wechat' } as never)
+    await settle()
+    assert.equal(node.pendingTrustUserId, null, 'no hold for the trusted owner')
+    node.dispose()
+  }))
+
+test('wechat/pair-pending auto-confirms only while the trust set is empty', () =>
+  withTempHome(async () => {
+    let confirmCalls = 0
+    const { ctx, handlers } = fakeAttachCtx({
+      wechat: {
+        confirmPairing: async () => {
+          confirmCalls += 1
+          return true
+        },
+      },
+    })
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [] } as never)
+    node.attach()
+    handlers.get('wechat/pair-pending')!({} as never)
+    await settle()
+    assert.equal(confirmCalls, 1, 'bootstrap auto-confirm')
+    // Now with a non-empty trust set the same event must NOT auto-confirm.
+    node.state.addPairedUserId('owner@im.wechat')
+    handlers.get('wechat/pair-pending')!({} as never)
+    await settle()
+    assert.equal(confirmCalls, 1, 'no auto-confirm once trusted users exist')
+    node.dispose()
+  }))
+
+test('revokePairedUser: unpairs, cascades bindings/tokens/ownership, notifies', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, CONFIG)
+    node.state.addPairedUserId('user-b@im.wechat')
+    node.state.setPeerSession('user-b@im.wechat', 'wechat-s1')
+    node.state.setSessionOwner('wechat-s1', 'user-b@im.wechat')
+    node.state.setContextToken('user-b@im.wechat', 'tok')
+    assert.equal(await node.revokePairedUser('nobody@im.wechat'), false, 'unknown id rejected')
+    assert.equal(await node.revokePairedUser('user-b@im.wechat'), true)
+    assert.ok(!node.state.listPairedUserIds().includes('user-b@im.wechat'))
+    assert.ok(node.state.getPeerSession('user-b@im.wechat') == null, 'binding cleared')
+    assert.equal(node.state.listSessionOwners().some(([id]) => id === 'wechat-s1'), false)
+    node.dispose()
+  }))
+
+// ---------------------------------------------------------------- orphan adoption
+
+function fakeSession(id: string, createdAt = 1) {
+  return { id, header: { createdAt }, seq: 0 } as never
+}
+
+test('orphan adoption: a peer adopts only its OWN created sessions', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx({
+      sessions: { list: () => [fakeSession('wechat-mine'), fakeSession('wechat-theirs')], get: () => undefined },
+    })
+    const node = new WechatBridgeNode(ctx as never, CONFIG)
+    node.state.setSessionCreator('wechat-mine', 'peer-a@im.wechat')
+    node.state.setSessionCreator('wechat-theirs', 'peer-b@im.wechat')
+    node.state.setContextToken('peer-a@im.wechat', 'tok')
+    // peer-b's session is invisible to peer-a even though peer-a has history.
+    assert.equal(await (node as never as { pickOrphanSession(p: string): Promise<string | null> }).pickOrphanSession('peer-a@im.wechat'), 'wechat-mine')
+    node.dispose()
+  }))
+
+test('orphan adoption: /close-released sessions are never adoptable', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx({
+      sessions: { list: () => [fakeSession('wechat-mine')], get: () => undefined },
+    })
+    const node = new WechatBridgeNode(ctx as never, CONFIG)
+    node.state.setSessionCreator('wechat-mine', 'peer-a@im.wechat')
+    node.state.setContextToken('peer-a@im.wechat', 'tok')
+    node.state.markSessionReleased('wechat-mine')
+    assert.equal(await (node as never as { pickOrphanSession(p: string): Promise<string | null> }).pickOrphanSession('peer-a@im.wechat'), null)
+    node.dispose()
+  }))
+
+test('orphan adoption: legacy sessions (no creator) adoptable only by a one-person trust set', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx({
+      sessions: { list: () => [fakeSession('wechat-legacy')], get: () => undefined },
+    })
+    const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: ['solo@im.wechat'] } as never)
+    node.state.setContextToken('solo@im.wechat', 'tok')
+    assert.equal(await (node as never as { pickOrphanSession(p: string): Promise<string | null> }).pickOrphanSession('solo@im.wechat'), 'wechat-legacy')
+    // Trust set of two → nobody may inherit the legacy session.
+    node.state.addPairedUserId('second@im.wechat')
+    assert.equal(await (node as never as { pickOrphanSession(p: string): Promise<string | null> }).pickOrphanSession('solo@im.wechat'), null)
+    node.dispose()
+  }))
+
+// ---------------------------------------------------------------- approval trim
+
+test('resolveApproval accepts /yes with trailing whitespace', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, CONFIG)
+    let outcome: string | null = null
+    const timer = setTimeout(() => {}, 60_000)
+    timer.unref()
+    node.registerApproval(1, {
+      number: 1,
+      peerId: 'peer-a@im.wechat',
+      request: {} as never,
+      resolve: (o: string) => {
+        outcome = o
+      },
+      timer,
+    } as never)
+    assert.equal(node.resolveApproval('/yes ', 'peer-a@im.wechat'), true)
+    assert.equal(outcome, 'allowed-once')
+    node.dispose()
+  }))
+
+// ---------------------------------------------------------------- inbound serialization
+
+test('inbound tasks run strictly serial per sender, parallel across senders', () =>
+  withTempHome(async () => {
+    const { ctx } = fakeAttachCtx()
+    const node = new WechatBridgeNode(ctx as never, CONFIG)
+    const order: string[] = []
+    const gate = () => new Promise<void>((r) => setTimeout(r, 15))
+    const internal = node as never as { enqueueInbound(p: string, t: () => Promise<void>): Promise<void> }
+    await Promise.all([
+      internal.enqueueInbound('a', async () => { order.push('a1-start'); await gate(); order.push('a1-end') }),
+      internal.enqueueInbound('a', async () => { order.push('a2-start'); await gate(); order.push('a2-end') }),
+      internal.enqueueInbound('b', async () => { order.push('b1-start'); await gate(); order.push('b1-end') }),
+    ])
+    assert.ok(order.indexOf('a1-end') < order.indexOf('a2-start'), 'same sender serialized')
+    node.dispose()
+  }))

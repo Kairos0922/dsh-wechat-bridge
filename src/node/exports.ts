@@ -7,6 +7,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { WechatBridgeNode } from './core.ts'
 import { defaultMediaDir } from './inbound.ts'
@@ -29,9 +30,14 @@ export function writeExportFile(
 ): { filePath: string; fileName: string } {
   const dir = exportsDir(node)
   fs.mkdirSync(dir, { recursive: true })
-  const fileName = `ds-${kind}-${safeName(String(sessionId))}-${Date.now().toString(36)}.md`
+  // Random suffix: two exports in the same millisecond must not overwrite
+  // each other; tmp+rename keeps a crash from leaving a half-written file
+  // that would later be uploaded as the attachment.
+  const fileName = `ds-${kind}-${safeName(String(sessionId))}-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}.md`
   const filePath = path.join(dir, fileName)
-  fs.writeFileSync(filePath, content, 'utf-8')
+  const tmp = `${filePath}.tmp`
+  fs.writeFileSync(tmp, content, { encoding: 'utf-8', mode: 0o600 })
+  fs.renameSync(tmp, filePath)
   return { filePath, fileName }
 }
 

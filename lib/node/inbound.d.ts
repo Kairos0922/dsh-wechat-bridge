@@ -26,9 +26,20 @@ export declare function defaultMediaDir(): string;
  * hands quoted media elsewhere).
  */
 export declare function isMediaItem(item: MessageItem | undefined): boolean;
-export declare function bodyFromItemList(itemList?: MessageItem[]): string;
+/** Quoted-message recursion ceiling — a pathological ref chain must never blow the stack. */
+export declare const MAX_REF_DEPTH = 8;
+export interface ExtractTextOptions {
+    /**
+     * Whether quoted-message bodies are included. Groups pass false: the quote
+     * may originate from a NON-allowlisted room member, and the allowlist gate
+     * only covers the current sender — quoted bodies from strangers must never
+     * reach the model context (the title, a short summary, is kept).
+     */
+    includeQuoteBody?: boolean;
+}
+export declare function bodyFromItemList(itemList?: MessageItem[], opts?: ExtractTextOptions, depth?: number): string;
 /** Extract the visible text of an inbound message (text + quoted context + voice transcription). */
-export declare function extractText(message: InboundMessage): string;
+export declare function extractText(message: InboundMessage, opts?: ExtractTextOptions): string;
 /** Whether a message belongs to a group chat (MVP: not supported, ignored). */
 export declare function isGroupMessage(message: InboundMessage): boolean;
 /** Handle one inbound iLink message. */

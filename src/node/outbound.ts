@@ -299,13 +299,14 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       // ('0|0|') fires exactly once per turn as the "started thinking" signal
       // and stays quiet afterwards (no progress = no spam).
       if (key === state.lastTickKey) return
+      const isFirstTick = state.lastTickKey === ''
       state.lastTickKey = key
       // Minimal liveness signal — deliberately quiet: the user asked for
       // fewer mid-task messages, but must always know the task is running.
       // The WeChat-native "typing…" indicator (typingTimer) is the primary
       // liveness signal; this digest only appears at a low frequency.
       const parts: string[] = []
-      if (state.lastTickKey === '') parts.push('🔄 仍在处理中（回复 /stop 可停止）')
+      if (isFirstTick) parts.push('🔄 仍在处理中（回复 /stop 可停止）')
       else parts.push('🔄 仍在处理中')
       if (state.toolCount > 0) parts.push(`已调用 ${state.toolCount} 个工具`)
       const elapsed = state.turnStartedAt > 0 ? Math.round((Date.now() - state.turnStartedAt) / 1000) : 0
@@ -491,7 +492,15 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
   }
 
   const disposer = node.ctx.on('session/event', onEvent)
+  // A released (/close) session drops its digest state — otherwise every
+  // ever-owned session leaves a resident Map entry for the process lifetime.
+  const unregisterCleanup = node.registerSessionCleanup((sessionId) => {
+    const state = digestState.get(sessionId)
+    if (state) stopHeartbeat(state)
+    digestState.delete(sessionId)
+  })
   return () => {
+    unregisterCleanup()
     for (const state of digestState.values()) stopHeartbeat(state)
     disposer()
   }
