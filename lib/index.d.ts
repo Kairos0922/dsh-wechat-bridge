@@ -87,6 +87,22 @@ export interface Config {
     token?: string;
     /** Bot account id override (prefer credentials). */
     accountId?: string;
+    /** Notify trusted users when a non-allowlisted sender attempts contact. */
+    notifyRejected?: boolean;
+    /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
+    typingHeartbeatSec?: number;
+    /** Sliding-window send budget window (seconds). */
+    sendBudgetWindowSec?: number;
+    /** Sliding-window send budget: max sends per window. */
+    sendBudgetMaxPerWindow?: number;
+    /** Directories `/video` may read from (default: cwd + media dir). */
+    videoRoots?: string[];
+    /** Extra trusted hosts for a server-provided baseUrl redirect (login/poll). */
+    trustedBaseHosts?: string[];
+    /** Extra trusted hosts for media download/upload CDN urls. */
+    trustedMediaHosts?: string[];
+    /** Non-loopback authorities the settings panel may be served under (LAN). */
+    webTrustedHosts?: string[];
 }
 export declare const Config: z<Config>;
 /**

@@ -12,6 +12,16 @@
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { WechatBridgeNode } from './core.ts';
 import { type ModeInfo } from './presets.ts';
+/** Hard size cap for /video uploads — checked before touching the file channel. */
+export declare const VIDEO_MAX_BYTES: number;
+/**
+ * Server-side allowlist for /video: `.mp4` regular files ≤ 10MB under the
+ * configured roots (default: the session cwd and the media dir). realpath
+ * resolves symlinks before the containment check; a missing ftyp box catches
+ * renamed non-videos. Returns the rejection reason, or null when sendable.
+ * Exported for tests.
+ */
+export declare function validateVideoPath(node: WechatBridgeNode, resolvedPath: string): string | null;
 /** Sessions ordered most-recent-first. */
 export declare function listSessions(node: WechatBridgeNode): Session[];
 /** Parse `/new` arguments: an optional mode (matching a discovered preset). */

@@ -352,7 +352,7 @@ async function main() {
     imageW: 157,
     imageH: 210,
   })
-  console.log('③ item 形状 →', JSON.stringify({ type: item.type, media: item.image_item?.media, mid_size: item.image_item?.mid_size, aeskey: item.image_item?.aeskey }))
+  console.log('③ item 形状 →', JSON.stringify({ type: item.type, media: item.image_item?.media, mid_size: item.image_item?.mid_size, aeskey: item.image_item?.aeskey ? `<redacted:${String(item.image_item.aeskey).length}字符>` : undefined }))
   if (args.dry) {
     console.log('⏸ --dry：不发送，到此为止。')
     return
@@ -368,6 +368,8 @@ async function main() {
 
   // ---- step 4 (optional): 服务器侧自下载闭环 ---------------------------------
   if (args.verify) {
+    // 实验性闭环：回源下载生产 CDN 属于带外探测，不在支持流程内；异常自行承担，勿据此改生产代码。
+    console.log('⑤（实验性，不受支持）服务器侧自下载开始…')
     try {
       const url = item.image_item?.media?.full_url
       const fetched = await fetch(url)

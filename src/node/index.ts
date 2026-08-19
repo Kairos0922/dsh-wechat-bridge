@@ -78,20 +78,27 @@ export interface NodeConfig {
   notifyRejected?: boolean
   /** Chrome binary path for the long-card renderer (auto-detected when unset). */
   chromePath?: string
+  /**
+   * Directories `/video` may read from (default: the session cwd and the
+   * media dir). A hard server-side allowlist — paths outside are refused.
+   */
+  videoRoots?: string[]
+  /** Non-loopback authorities the settings panel may be served under (LAN). */
+  webTrustedHosts?: string[]
 }
 
 export const Config: z<NodeConfig> = z.object({
   allowFrom: z.array(z.string()).default([]),
-  approvalTimeoutSec: z.number().default(600),
-  maxMessageChars: z.number().default(MAX_MESSAGE_CHARS),
-  minSendIntervalMs: z.number().default(5_000),
-  rateLimitBackoffSecs: z.array(z.number()).default([10, 30, 60]),
-  sessionExpiredPauseMin: z.number().default(60),
-  thinkingDigestSec: z.number().default(120),
-  typingHeartbeatSec: z.number().default(25),
-  sendBudgetWindowSec: z.number().default(60),
-  sendBudgetMaxPerWindow: z.number().default(4),
-  menuTimeoutSec: z.number().default(60),
+  approvalTimeoutSec: z.number().min(1).default(600),
+  maxMessageChars: z.number().min(1).default(MAX_MESSAGE_CHARS),
+  minSendIntervalMs: z.number().min(0).default(5_000),
+  rateLimitBackoffSecs: z.array(z.number().min(1)).default([10, 30, 60]),
+  sessionExpiredPauseMin: z.number().min(1).default(60),
+  thinkingDigestSec: z.number().min(0).default(120),
+  typingHeartbeatSec: z.number().min(0).default(25),
+  sendBudgetWindowSec: z.number().min(1).default(60),
+  sendBudgetMaxPerWindow: z.number().min(1).default(4),
+  menuTimeoutSec: z.number().min(1).default(60),
   markdownMode: z.union(['passthrough', 'filter', 'plain']).default('passthrough'),
   progressToolPrefixes: z.array(z.string()).default([]),
   cwd: z.string(),
@@ -99,13 +106,16 @@ export const Config: z<NodeConfig> = z.object({
   agentProvider: z.string(),
   agentModel: z.string(),
   mediaDir: z.string(),
-  fileThresholdChars: z.number().default(0),
+  fileThresholdChars: z.number().min(0).default(0),
   notifyOnComplete: z.boolean().default(false),
-  notifyMinTurnSec: z.number().default(300),
-  mediaRetentionDays: z.number().default(30),
+  notifyMinTurnSec: z.number().min(0).default(300),
+  mediaRetentionDays: z.number().min(0).default(30),
   allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
   cardMode: z.union(['off', 'long']).default('off'),
+  notifyRejected: z.boolean().default(false),
   chromePath: z.string(),
+  videoRoots: z.array(z.string()),
+  webTrustedHosts: z.array(z.string()),
 })
 
 /** Plugin identity + service deps (object form, resolved per plugin row). */
@@ -140,6 +150,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     cardMode: config.cardMode ?? 'off',
     notifyRejected: config.notifyRejected ?? false,
     chromePath: config.chromePath,
+    videoRoots: config.videoRoots,
   }
   const node = new WechatBridgeNode(ctx, resolved)
   node.attach()
@@ -151,7 +162,7 @@ function apply(ctx: Context, config: NodeConfig): void {
   )
   // Settings-panel host API (differentiator #3) — registered here because the
   // node row can inject `wechat` while the bundle row cannot (same-scope mount).
-  registerHostApi(ctx, ctx.wechat, node)
+  registerHostApi(ctx, ctx.wechat, node, { trustedHosts: config.webTrustedHosts ?? [] })
   ctx.effect(() => {
     return () => {
       node.dispose()

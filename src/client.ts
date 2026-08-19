@@ -64,6 +64,15 @@ const zh = {
     '/yes /no — 回应权限请求',
   ].join('\n'),
   requestFailed: '状态读取失败',
+  pendingPairTitle: '⚠ 检测到不同的机器人身份',
+  pendingPairBody: '扫码人 {id} 请求切换本桥接的凭证（账号 {account}）。确认将覆盖当前凭证；拒绝保持现状。',
+  pendingTrustTitle: '新扫码用户待确认',
+  pendingTrustBody: '扫码人 {id} 已完成配对，确认后加入信任名单并可使用本机器人；拒绝则不会被信任。',
+  confirm: '确认',
+  reject: '拒绝',
+  pairedUsers: '已配对用户',
+  revoke: '吊销',
+  revokeHint: '吊销后对方立即失去访问权，其会话绑定与令牌一并清除。',
 }
 
 const en = {
@@ -99,6 +108,15 @@ const en = {
     '/yes /no — answer permission requests',
   ].join('\n'),
   requestFailed: 'Failed to load status',
+  pendingPairTitle: '⚠ A different bot identity scanned',
+  pendingPairBody: 'Scanner {id} requests switching this bridge to account {account}. Confirm overwrites the current credentials; reject keeps them.',
+  pendingTrustTitle: 'New scanner awaiting confirmation',
+  pendingTrustBody: 'Scanner {id} finished pairing. Confirm to trust them with this bridge; reject to keep them untrusted.',
+  confirm: 'Confirm',
+  reject: 'Reject',
+  pairedUsers: 'Paired users',
+  revoke: 'Revoke',
+  revokeHint: 'Revoking immediately cuts access and clears their session bindings and tokens.',
 }
 
 // ---------------------------------------------------------------- data
@@ -122,6 +140,9 @@ interface Status {
   prefs: { provider?: string; model?: string; cwd?: string }
   outbox: { pending: number; pausedUntil: number | null }
   lastSendError: { errcode?: number; errmsg?: string; at: number } | null
+  pendingPair: { userId: string; accountId: string } | null
+  pendingTrustUserId: string | null
+  pairedUserIds: string[]
 }
 
 function useStatus(): { status: Status | null; refresh: () => Promise<void> } {
@@ -192,9 +213,10 @@ const css: Record<string, CSSProperties> = {
 
 function WechatBridgePanel(props: { t: (key: string) => string }) {
   const { t } = props
-  const { status } = useStatus()
+  const { status, refresh } = useStatus()
   const [qr, setQr] = useState<string | null>(null)
   const [pairing, setPairing] = useState(false)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const pair = async (): Promise<void> => {
@@ -208,6 +230,26 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
     } catch (err) {
       setError(String(err))
       setPairing(false)
+    }
+  }
+
+  /** POST a pairing-management action and re-poll the status afterwards. */
+  const action = async (path: string, body?: Record<string, string>): Promise<void> => {
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      })
+      const data = (await res.json()) as { ok: boolean; error?: string }
+      if (!data.ok) throw new Error(data.error ?? 'action failed')
+      await refresh()
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -272,6 +314,31 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
         ? h('p', { style: css.muted }, `⚠ ${t('requestFailed')}: errcode=${status.lastSendError.errcode ?? '-'} ${status.lastSendError.errmsg ?? ''}`)
         : null,
     ),
+    // Held bot-identity switch: the gateway refuses to overwrite credentials
+    // until a human confirms here (empty trust set auto-confirms host-side).
+    status?.pendingPair
+      ? h('div', { style: { ...css.card, border: '1px solid var(--dsw-alias-state-error-primary)' } },
+          h('h4', { style: css.title }, t('pendingPairTitle')),
+          h('p', { style: css.muted },
+            t('pendingPairBody').replace('{id}', status.pendingPair.userId).replace('{account}', status.pendingPair.accountId || '—'),
+          ),
+          h('div', { style: { display: 'flex', gap: 8 } },
+            h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/pair/confirm') }, t('confirm')),
+            h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/pair/reject') }, t('reject')),
+          ),
+        )
+      : null,
+    // New scanner held for operator confirmation (trust set was non-empty).
+    status?.pendingTrustUserId
+      ? h('div', { style: { ...css.card, border: '1px solid var(--dsw-alias-state-error-primary)' } },
+          h('h4', { style: css.title }, t('pendingTrustTitle')),
+          h('p', { style: css.muted }, t('pendingTrustBody').replace('{id}', status.pendingTrustUserId)),
+          h('div', { style: { display: 'flex', gap: 8 } },
+            h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/pair/confirm') }, t('confirm')),
+            h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/pair/reject') }, t('reject')),
+          ),
+        )
+      : null,
     h('div', { style: css.card },
       h('div', { style: css.row },
         h('h4', { style: css.title }, t('pair')),
@@ -281,6 +348,21 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
       h('p', { style: css.muted }, t('pairHint')),
       error ? h('p', { style: css.error }, `${t('requestFailed')}: ${error}`) : null,
     ),
+    // Paired users with one-click revocation.
+    (status?.pairedUserIds ?? []).length > 0
+      ? h('div', { style: css.card },
+          h('h4', { style: css.title }, t('pairedUsers')),
+          h('div', null,
+            status!.pairedUserIds.map((id) =>
+              h('div', { key: id, style: css.row },
+                h('span', { style: css.chip }, id),
+                h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/pair/revoke', { userId: id }) }, t('revoke')),
+              ),
+            ),
+          ),
+          h('p', { style: css.muted }, t('revokeHint')),
+        )
+      : null,
     h('div', { style: css.card },
       h('h4', { style: css.title }, t('helpTitle')),
       h('pre', { style: css.pre }, t('help')),

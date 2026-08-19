@@ -92,6 +92,22 @@ export interface Config {
   token?: string
   /** Bot account id override (prefer credentials). */
   accountId?: string
+  /** Notify trusted users when a non-allowlisted sender attempts contact. */
+  notifyRejected?: boolean
+  /** Re-send the typing indicator every N seconds during a long turn (0 = off). */
+  typingHeartbeatSec?: number
+  /** Sliding-window send budget window (seconds). */
+  sendBudgetWindowSec?: number
+  /** Sliding-window send budget: max sends per window. */
+  sendBudgetMaxPerWindow?: number
+  /** Directories `/video` may read from (default: cwd + media dir). */
+  videoRoots?: string[]
+  /** Extra trusted hosts for a server-provided baseUrl redirect (login/poll). */
+  trustedBaseHosts?: string[]
+  /** Extra trusted hosts for media download/upload CDN urls. */
+  trustedMediaHosts?: string[]
+  /** Non-loopback authorities the settings panel may be served under (LAN). */
+  webTrustedHosts?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -118,9 +134,16 @@ export const Config: z<Config> = z.object({
   cardMode: z.union(['off', 'long']).default('off'),
   /** Notify trusted users when a non-allowlisted sender attempts contact. */
   notifyRejected: z.boolean().default(false),
+  typingHeartbeatSec: z.number().min(0).default(25),
+  sendBudgetWindowSec: z.number().min(1).default(60),
+  sendBudgetMaxPerWindow: z.number().min(1).default(4),
   chromePath: z.string(),
+  videoRoots: z.array(z.string()),
   baseUrl: z.string().default(ILINK_BASE_URL),
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
+  trustedBaseHosts: z.array(z.string()),
+  trustedMediaHosts: z.array(z.string()),
+  webTrustedHosts: z.array(z.string()),
   token: z.string().default(''),
   accountId: z.string().default(''),
 })
@@ -130,11 +153,23 @@ export const Config: z<Config> = z.object({
  * present (resolved from the `credentials` service at startup).
  */
 export function apply(ctx: Context, config: Config): void {
+  if (config.token) {
+    // A token inline in the config file is readable by anyone with file
+    // access and ends up in backups; the credentials service (macOS
+    // Keychain / secrets manager) is the intended store. Warn, don't block —
+    // some deployments legitimately manage their config file with vaults.
+    ctx.logger.warn(
+      '[dsh-wechat-bridge] `token` is set inline in the config file — prefer the credentials service; ' +
+        'inline tokens leak into config backups',
+    )
+  }
   ctx.plugin(WechatGateway, {
     baseUrl: config.baseUrl,
     cdnBaseUrl: config.cdnBaseUrl,
     token: config.token,
     accountId: config.accountId,
+    trustedBaseHosts: config.trustedBaseHosts,
+    trustedMediaHosts: config.trustedMediaHosts,
   })
   ctx.plugin(wechatBridgeNode, {
     allowFrom: config.allowFrom ?? [],
@@ -144,6 +179,9 @@ export function apply(ctx: Context, config: Config): void {
     rateLimitBackoffSecs: config.rateLimitBackoffSecs,
     sessionExpiredPauseMin: config.sessionExpiredPauseMin,
     thinkingDigestSec: config.thinkingDigestSec,
+    typingHeartbeatSec: config.typingHeartbeatSec,
+    sendBudgetWindowSec: config.sendBudgetWindowSec,
+    sendBudgetMaxPerWindow: config.sendBudgetMaxPerWindow,
     menuTimeoutSec: config.menuTimeoutSec,
     markdownMode: config.markdownMode,
     progressToolPrefixes: config.progressToolPrefixes,
@@ -158,7 +196,10 @@ export function apply(ctx: Context, config: Config): void {
     mediaRetentionDays: config.mediaRetentionDays,
     allowGroups: config.allowGroups,
     cardMode: config.cardMode,
+    notifyRejected: config.notifyRejected,
     chromePath: config.chromePath,
+    videoRoots: config.videoRoots,
+    webTrustedHosts: config.webTrustedHosts,
   })
 }
 

@@ -76,6 +76,13 @@ export interface NodeConfig {
     notifyRejected?: boolean;
     /** Chrome binary path for the long-card renderer (auto-detected when unset). */
     chromePath?: string;
+    /**
+     * Directories `/video` may read from (default: the session cwd and the
+     * media dir). A hard server-side allowlist — paths outside are refused.
+     */
+    videoRoots?: string[];
+    /** Non-loopback authorities the settings panel may be served under (LAN). */
+    webTrustedHosts?: string[];
 }
 export declare const Config: z<NodeConfig>;
 /** Plugin identity + service deps (object form, resolved per plugin row). */

@@ -11,12 +11,18 @@
 #   scripts/dry-run.sh            # 自动挑空闲端口，打印探针 URL 后按回车停止
 #   scripts/dry-run.sh --check    # 只启动、断言端点健康、自动退出（CI 用）
 #
-# 依赖：dsh CLI（npm i -g 的 deepseek-harness）、curl、python3。
+# 依赖：dsh CLI（npm i -g 的 deepseek-harness）、curl、python3（brew install python3）。
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DSH_BIN="${DSH_BIN:-$HOME/.npm-global/bin/dsh}"
+
+# 依赖前置检查：缺依赖时在干净的信息里失败，而不是半途报错。
+for tool in curl python3; do
+  command -v "$tool" > /dev/null 2>&1 || { echo "✖ 缺少依赖: $tool（macOS: brew install python3）"; exit 1; }
+done
+[[ -x "$DSH_BIN" ]] || { echo "✖ 找不到 dsh CLI: $DSH_BIN（npm i -g 的 deepseek-harness，或设 DSH_BIN）"; exit 1; }
 PROBE_HOME="$(mktemp -d /tmp/dwb-probe-home.XXXXXX)"
 LOG="$PROBE_HOME/boot.log"
 PORT=0

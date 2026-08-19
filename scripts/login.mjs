@@ -56,7 +56,8 @@ const result = await ctx.wechat.loginQr({
           console.log('   请用浏览器打开上面的文件，用手机微信扫码并确认。\n')
         }
       } catch (err) {
-        console.log(`二维码生成失败（${String(err)}），扫码内容（备用）: ${qr.scanData}\n`)
+        // 不打印 qr.scanData：扫码内容即登录授权链接，落进终端日志/截图任何人都能替你配对。
+        console.log(`二维码生成失败（${String(err)}）。请确认 qrcode 依赖已安装后重试。\n`)
       }
     })()
   },
