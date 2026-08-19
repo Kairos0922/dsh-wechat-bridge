@@ -8,7 +8,7 @@
 
 import { createDecipheriv } from 'node:crypto'
 import type { ImageItem } from './types.ts'
-import { WEIXIN_CDN_BASE_URL } from './types.ts'
+import { assertCdnUrl, MEDIA_DOWNLOAD_MAX_BYTES, WEIXIN_CDN_BASE_URL } from './types.ts'
 
 /** Decrypt AES-128-ECB (PKCS7 padding). */
 export function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
@@ -56,25 +56,93 @@ export interface DownloadImageResult {
   ext: string
 }
 
+/** Per-hop fetch timeout for CDN downloads (F4). */
+export const CDN_DOWNLOAD_TIMEOUT_MS = 30_000
+/** Max manual 3xx redirects followed during a CDN download (F4). */
+const MAX_CDN_REDIRECTS = 3
+
+/**
+ * Fetch a CDN URL with `redirect: 'manual'` and follow 3xx ourselves so every
+ * hop re-passes assertCdnUrl. At most MAX_CDN_REDIRECTS hops; the final
+ * response is returned (non-2xx is rejected by the caller).
+ */
+async function fetchCdnWithRedirects(
+  startUrl: URL,
+  extraTrustedHosts: readonly string[] | undefined,
+  fetchFn: typeof fetch,
+): Promise<Response> {
+  let url = startUrl
+  for (let hop = 0; ; hop++) {
+    const res = await fetchFn(url.toString(), {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(CDN_DOWNLOAD_TIMEOUT_MS),
+    })
+    if (res.status >= 300 && res.status < 400) {
+      if (hop >= MAX_CDN_REDIRECTS) {
+        throw new Error(`CDN download exceeded ${MAX_CDN_REDIRECTS} redirects`)
+      }
+      const location = res.headers.get('location')
+      if (!location) throw new Error(`CDN redirect ${res.status} without Location header`)
+      // Absolute-ize the target and re-validate before following.
+      url = assertCdnUrl(new URL(location, url).toString(), extraTrustedHosts)
+      continue
+    }
+    return res
+  }
+}
+
 /**
  * Download and decrypt one inbound image. Prefers the server-provided
  * `full_url`, then the client-built URL from `encrypt_query_param`.
+ *
+ * F4: the URL must pass assertCdnUrl, redirects are followed manually (each
+ * hop re-validated, max 3), the body is streamed with a hard size cap and a
+ * per-hop 30s timeout. `fetchFn` is injectable for tests.
  */
 export async function downloadImage(params: {
   item: ImageItem
   cdnBaseUrl?: string
+  extraTrustedHosts?: readonly string[]
+  fetchFn?: typeof fetch
 }): Promise<DownloadImageResult> {
   const { item } = params
   const cdnBaseUrl = params.cdnBaseUrl || WEIXIN_CDN_BASE_URL
+  const fetchFn = params.fetchFn ?? globalThis.fetch
   const media = item.media ?? {}
-  const url = media.full_url || item.url || buildCdnDownloadUrl(media.encrypt_query_param ?? '', cdnBaseUrl)
-  if (!url) throw new Error('image item has no url/encrypt_query_param')
+  const fullUrl = media.full_url?.trim()
+  const itemUrl = item.url?.trim()
+  const encParam = media.encrypt_query_param?.trim()
+  // Empty encrypt_query_param with no full_url/item.url: fail BEFORE any
+  // fetch (this used to be dead code — buildCdnDownloadUrl('') is truthy).
+  if (!fullUrl && !itemUrl && !encParam) {
+    throw new Error('image item has no url/encrypt_query_param')
+  }
+  const rawUrl = fullUrl || itemUrl || buildCdnDownloadUrl(encParam ?? '', cdnBaseUrl)
+  const cdnUrl = assertCdnUrl(rawUrl, params.extraTrustedHosts)
 
-  const res = await fetch(url)
+  const res = await fetchCdnWithRedirects(cdnUrl, params.extraTrustedHosts, fetchFn)
   if (!res.ok) {
     throw new Error(`CDN download ${res.status} ${res.statusText}`)
   }
-  const encrypted = Buffer.from(await res.arrayBuffer())
+  // Size cap from the declared Content-Length when present…
+  const contentLength = Number(res.headers.get('content-length') ?? '') || 0
+  if (contentLength > MEDIA_DOWNLOAD_MAX_BYTES) {
+    throw new Error(`CDN download too large: ${contentLength} bytes > ${MEDIA_DOWNLOAD_MAX_BYTES}`)
+  }
+  // …and enforced while streaming — never a blind arrayBuffer() read.
+  const chunks: Buffer[] = []
+  let total = 0
+  if (res.body) {
+    for await (const chunk of res.body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += buf.length
+      if (total > MEDIA_DOWNLOAD_MAX_BYTES) {
+        throw new Error(`CDN download exceeded ${MEDIA_DOWNLOAD_MAX_BYTES} bytes`)
+      }
+      chunks.push(buf)
+    }
+  }
+  const encrypted = Buffer.concat(chunks)
   const keyInput = item.aeskey || media.aes_key
   if (!keyInput) throw new Error('image item has no aes key')
   const key = parseAesKey(keyInput)

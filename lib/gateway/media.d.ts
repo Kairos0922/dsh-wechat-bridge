@@ -23,12 +23,20 @@ export interface DownloadImageResult {
     data: Buffer;
     ext: string;
 }
+/** Per-hop fetch timeout for CDN downloads (F4). */
+export declare const CDN_DOWNLOAD_TIMEOUT_MS = 30000;
 /**
  * Download and decrypt one inbound image. Prefers the server-provided
  * `full_url`, then the client-built URL from `encrypt_query_param`.
+ *
+ * F4: the URL must pass assertCdnUrl, redirects are followed manually (each
+ * hop re-validated, max 3), the body is streamed with a hard size cap and a
+ * per-hop 30s timeout. `fetchFn` is injectable for tests.
  */
 export declare function downloadImage(params: {
     item: ImageItem;
     cdnBaseUrl?: string;
+    extraTrustedHosts?: readonly string[];
+    fetchFn?: typeof fetch;
 }): Promise<DownloadImageResult>;
 //# sourceMappingURL=media.d.ts.map

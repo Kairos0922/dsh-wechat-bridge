@@ -33,6 +33,18 @@ export declare const RATE_LIMIT_ERRMSG_MARKERS: readonly ["rate limited", "freq 
 export type SendFailureClass = 'stale-session' | 'rate-limit' | 'session-expired' | 'generic';
 /** Classify a server-side send failure (ret/errcode/errmsg verbatim). */
 export declare function classifySendFailure(ret: number | undefined, errcode: number | undefined, errmsg: string | undefined): SendFailureClass;
+/**
+ * Poll-batch disposition for the gateway's long-poll loop. Same classifier
+ * as outbound sends (dual-slot: ret===code || errcode===code) so a negative
+ * `ret` without `errcode` can never fall into the success path.
+ */
+export type PollBatchClass = 'ok' | 'session-expired' | 'rate-limit' | 'generic-negative';
+/** Classify one getUpdates batch for the poll loop's recovery dispatch. */
+export declare function classifyPollBatch(batch: {
+    ret?: number;
+    errcode?: number;
+    errmsg?: string;
+}): PollBatchClass;
 export declare const ITEM_TEXT = 1;
 export declare const ITEM_IMAGE = 2;
 export declare const ITEM_VOICE = 3;
@@ -48,6 +60,27 @@ export declare const UPLOAD_MEDIA_FILE = 3;
 export declare const UPLOAD_MEDIA_VOICE = 4;
 export declare const MESSAGE_TYPE_USER = 1;
 export declare const MESSAGE_TYPE_BOT = 2;
+/** Outbound message lifecycle: FINISH = the message is complete and renderable. */
+export declare const MESSAGE_STATE_FINISH = 2;
+/**
+ * H1: normalize and validate a gateway base URL. Accepts a bare hostname
+ * (https:// is prepended), requires WHATWG-parseable https with a trusted
+ * hostname (`ilinkai.weixin.qq.com`, any `*.weixin.qq.com` subdomain, or an
+ * exact `extraTrustedHosts` match). Any violation returns `fallback`.
+ */
+export declare function sanitizeBaseUrl(candidate: string | null | undefined, fallback: string, extraTrustedHosts?: readonly string[]): string;
+/**
+ * Hard cap for a single CDN media download (F4). Enforced both from
+ * Content-Length and while streaming the body.
+ */
+export declare const MEDIA_DOWNLOAD_MAX_BYTES: number;
+/**
+ * F4: validate a CDN media URL before any fetch/POST. Requires https and a
+ * trusted hostname: `novac2c.cdn.weixin.qq.com`, any `*.cdn.weixin.qq.com`
+ * subdomain, or an exact `extraTrustedHosts` match (case-insensitive).
+ * Throws on any violation; returns the parsed URL on success.
+ */
+export declare function assertCdnUrl(rawUrl: string, extraTrustedHosts?: readonly string[]): URL;
 export interface TextItem {
     text?: string;
 }

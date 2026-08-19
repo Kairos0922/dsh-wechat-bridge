@@ -14,7 +14,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { InboundMessage, MessageItem, UpdatesBatch } from './types.ts'
+import { MESSAGE_TYPE_BOT, MESSAGE_STATE_FINISH, type InboundMessage, type MessageItem, type UpdatesBatch } from './types.ts'
 
 export const LOGIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 export const DEFAULT_BOT_TYPE = '3'
@@ -117,28 +117,28 @@ async function apiPostFetch(params: {
   abortSignal?: AbortSignal
 }): Promise<string> {
   const url = new URL(params.endpoint, ensureTrailingSlash(params.baseUrl))
-  const controller = params.timeoutMs !== undefined ? new AbortController() : undefined
-  const timer =
-    controller !== undefined && params.timeoutMs !== undefined
-      ? setTimeout(() => controller.abort(), params.timeoutMs)
-      : undefined
-  const onExternalAbort = () => controller?.abort()
+  // M13: the timeout budget covers the ENTIRE exchange — including the
+  // response body read, which used to run without any deadline after the
+  // headers arrived. Default 60s when the caller does not specify one.
+  const timeoutMs = params.timeoutMs ?? 60_000
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const onExternalAbort = () => controller.abort()
   params.abortSignal?.addEventListener('abort', onExternalAbort, { once: true })
   try {
     const res = await fetch(url.toString(), {
       method: 'POST',
       headers: buildHeaders({ token: params.token }),
       body: params.body,
-      signal: controller?.signal,
+      signal: controller.signal,
     })
-    if (timer !== undefined) clearTimeout(timer)
     const rawText = await res.text()
     if (!res.ok) {
       throw new Error(`POST ${params.endpoint} status=${res.status}: ${rawText.slice(0, 200)}`)
     }
     return rawText
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
+    clearTimeout(timer)
     params.abortSignal?.removeEventListener('abort', onExternalAbort)
   }
 }
@@ -215,9 +215,6 @@ export interface SendMessageBody {
   run_id?: string
   item_list: MessageItem[]
 }
-
-const MESSAGE_TYPE_BOT = 2
-const MESSAGE_STATE_FINISH = 2
 
 /** Structured business-level send failure: ret/errcode/errmsg verbatim. */
 export class IlinkSendError extends Error {

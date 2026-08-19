@@ -8,7 +8,7 @@
  *
  * @module dsh-wechat-bridge/gateway/ilink-client
  */
-import type { MessageItem, UpdatesBatch } from './types.ts';
+import { type MessageItem, type UpdatesBatch } from './types.ts';
 export declare const LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com";
 export declare const DEFAULT_BOT_TYPE = "3";
 export declare const DEFAULT_BOT_AGENT = "dsh-wechat-bridge/0.1.0";

@@ -38,13 +38,13 @@ import {
   ITEM_TEXT,
   ITEM_VIDEO,
   MESSAGE_TYPE_USER,
-  RATE_LIMIT_ERRCODE,
-  SESSION_EXPIRED_ERRCODE,
   UPLOAD_MEDIA_FILE,
   UPLOAD_MEDIA_IMAGE,
   UPLOAD_MEDIA_VIDEO,
   WEIXIN_CDN_BASE_URL,
+  classifyPollBatch,
   classifySendFailure,
+  sanitizeBaseUrl,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
@@ -69,6 +69,16 @@ export interface GatewayConfig {
   cdnBaseUrl?: string
   token?: string
   accountId?: string
+  /**
+   * H1: extra hostnames (besides ilinkai.weixin.qq.com / *.weixin.qq.com)
+   * accepted by base-url validation. Exact hostname match, case-insensitive.
+   */
+  trustedBaseHosts?: string[]
+  /**
+   * F4: extra hostnames (besides novac2c.cdn.weixin.qq.com / *.cdn.weixin.qq.com)
+   * accepted for CDN media download/upload URLs.
+   */
+  trustedMediaHosts?: string[]
 }
 
 export const Config = z.object({
@@ -76,6 +86,8 @@ export const Config = z.object({
   cdnBaseUrl: z.string().default(WEIXIN_CDN_BASE_URL),
   token: z.string().default(''),
   accountId: z.string().default(''),
+  trustedBaseHosts: z.array(z.string()).default([]),
+  trustedMediaHosts: z.array(z.string()).default([]),
 })
 
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped'
@@ -103,6 +115,43 @@ export interface LoginQrResult {
 
 export interface ResolvedGatewayConfig extends Required<GatewayConfig> {}
 
+/**
+ * F5: log only the trailing 12 chars of a context token — the debug sinks
+ * are plaintext JSONL under $DSH_HOME and must not carry full tokens.
+ */
+export function redactContextToken(token: string | null | undefined): string | null {
+  return token ? token.slice(-12) : null
+}
+
+/**
+ * F5: deep-copy the media-relevant layers of an inbound item (never mutate
+ * the live object) and replace AES keys with '<redacted>' before any log or
+ * capture sink sees them. Walks only the KNOWN layers — image/file/voice/
+ * video items plus their media/thumb_media sub-objects — no full recursion.
+ */
+export function redactItemForCapture(item: MessageItem): MessageItem {
+  const redactObj = (obj: Record<string, unknown>): Record<string, unknown> => {
+    const out = { ...obj }
+    for (const key of ['aeskey', 'aes_key']) {
+      if (key in out) out[key] = '<redacted>'
+    }
+    for (const subKey of ['media', 'thumb_media']) {
+      const sub = out[subKey]
+      if (sub !== undefined && sub !== null && typeof sub === 'object') {
+        out[subKey] = redactObj({ ...(sub as Record<string, unknown>) })
+      }
+    }
+    return out
+  }
+  const clone: MessageItem = { ...item }
+  for (const layerKey of ['image_item', 'file_item', 'voice_item', 'video_item'] as const) {
+    const layer = clone[layerKey]
+    if (!layer) continue
+    ;(clone as Record<string, unknown>)[layerKey] = redactObj({ ...(layer as Record<string, unknown>) })
+  }
+  return clone
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The iLink gateway service provided by the wechat-gateway plugin. */
@@ -115,6 +164,12 @@ declare module '@deepseek-ai/cordis' {
     'wechat/status'(status: GatewayStatus): void
     /** A QR pairing was confirmed — the pairer's WeChat id is the trust anchor. */
     'wechat/paired'(payload: { userId: string; accountId: string | null }): void
+    /**
+     * A DIFFERENT account scanned the QR while another account is paired.
+     * The gateway does NOT switch credentials — it awaits the panel's
+     * confirmPairing() / rejectPairing() (C3/H4).
+     */
+    'wechat/pair-pending'(payload: { userId: string | null; accountId: string | null }): void
     /** The long-poll recovered after consecutive failures. */
     'wechat/back-online'(): void
   }
@@ -137,6 +192,26 @@ export class WechatGateway extends Service {
   private pollCursorStore = new PollCursorStore()
   /** Last send failure facts for the status panel and outbox pause display. */
   lastSendError: { errcode?: number; errmsg?: string; at: number } | null = null
+
+  // ---- C3/H4: pending pairing (new account scanned while another is paired) ----
+  /** Full stashed credentials of the pending pairing (kept private). */
+  private pendingCreds: WechatCredentials | null = null
+
+  /**
+   * C3: a pairing awaiting panel confirmation. Only the pairer's ids are
+   * exposed — the full credentials stay private until confirmPairing().
+   */
+  get pendingPair(): { userId: string | null; accountId: string | null } | null {
+    if (!this.pendingCreds) return null
+    return { userId: this.pendingCreds.ilinkUserId ?? null, accountId: this.pendingCreds.accountId ?? null }
+  }
+
+  // ---- M2: unified poll-loop lifecycle (single concurrent loop) ----
+  private pollRunning = false
+  /** Bumped on every stop/start so a superseded loop exits promptly. */
+  private pollGeneration = 0
+  /** Lifetime promise of the current loop (its wrapper chain). */
+  private pollLoopPromise: Promise<void> | null = null
 
   // ---- typing-ticket cache (port of the official WeixinConfigManager) ----
   // getConfig is an extra API call per indicator; caching keeps bursts from
@@ -188,7 +263,12 @@ export class WechatGateway extends Service {
         return {
           accountId: typeof accountId === 'string' ? accountId : undefined,
           botToken: token,
-          baseUrl: typeof baseUrl === 'string' && baseUrl.trim() ? baseUrl : this.c.baseUrl,
+          // H1: re-validate the persisted baseUrl (self-heal historical
+          // pollution: http URLs, foreign hosts, bare hostnames).
+          baseUrl:
+            typeof baseUrl === 'string' && baseUrl.trim()
+              ? sanitizeBaseUrl(baseUrl, LOGIN_BASE_URL, this.c.trustedBaseHosts)
+              : this.c.baseUrl,
         }
       }
     } catch (err) {
@@ -212,7 +292,7 @@ export class WechatGateway extends Service {
       debugLogEvent({ event: 'notify-start', ok: false, error: String(err).slice(0, 200) })
     }
     this.status = 'polling'
-    void this.pollLoop(creds)
+    void this.startPollLoop(creds)
   }
 
   // ---------------------------------------------------------------- QR login
@@ -235,6 +315,12 @@ export class WechatGateway extends Service {
     onQr?: (qr: { scanData: string; pollToken: string }) => void
     onStatus?: (status: QrLoginStatus | string) => void
     onConfirmed: (creds: WechatCredentials) => Promise<void>
+    /**
+     * Panel flow only: after a confirmed pairing, start/restart the poll loop
+     * with the confirmed credentials through the unified entry (M2). The CLI
+     * flow leaves it false — the caller persists credentials itself.
+     */
+    startPolling?: boolean
   }): Promise<{ success: boolean; credentials?: WechatCredentials; message: string }> {
     const timeoutMs = opts.timeoutMs ?? 5 * 60_000
     const pollIntervalMs = opts.qrPollIntervalMs ?? 1500
@@ -247,55 +333,100 @@ export class WechatGateway extends Service {
       opts.onQr?.({ scanData: qr.qrcode_img_content || qr.qrcode, pollToken: qr.qrcode })
     }
 
-    let qr = await fetchQrCode({ botType: opts.botType })
-    emitQr(qr)
+    try {
+      let qr = await fetchQrCode({ botType: opts.botType })
+      emitQr(qr)
 
-    let baseUrl = LOGIN_BASE_URL
-    while (Date.now() - startedAt < timeoutMs) {
-      const st = await pollQrStatus({ baseUrl, qrcode: qr.qrcode })
-      switch (st.status) {
-        case 'confirmed': {
-          const creds: WechatCredentials = {
-            accountId: st.ilink_bot_id,
-            botToken: st.bot_token,
-            baseUrl: st.baseurl || baseUrl,
-            ilinkUserId: st.ilink_user_id,
+      let baseUrl = LOGIN_BASE_URL
+      while (Date.now() - startedAt < timeoutMs) {
+        const st = await pollQrStatus({ baseUrl, qrcode: qr.qrcode })
+        switch (st.status) {
+          case 'confirmed': {
+            const creds: WechatCredentials = {
+              accountId: st.ilink_bot_id,
+              botToken: st.bot_token,
+              baseUrl: sanitizeBaseUrl(st.baseurl, baseUrl, this.c.trustedBaseHosts),
+              ilinkUserId: st.ilink_user_id,
+            }
+            const existing = await this.resolveCredentials()
+            const sameIdentity =
+              existing != null &&
+              ((existing.accountId != null && existing.accountId === creds.accountId) ||
+                (existing.botToken != null && existing.botToken === creds.botToken))
+            if (!existing || sameIdentity) {
+              // Same account (or first pairing): keep the current behavior.
+              await opts.onConfirmed(creds)
+              const tokenChanged = existing != null && existing.botToken != null && existing.botToken !== creds.botToken
+              // M2: a refreshed token for the SAME account must tear down the
+              // old loop (abort + await exit) and restart via the unified entry.
+              if (opts.startPolling && (!existing || tokenChanged)) {
+                void this.startPollLoop(creds)
+              }
+              this.status = 'polling'
+              // Product event: the pairer's WeChat id is now the trust anchor —
+              // the bridge node reacts with a first-run welcome message.
+              if (creds.ilinkUserId) {
+                this.ctx.emit('wechat/paired', { userId: creds.ilinkUserId, accountId: creds.accountId ?? null })
+              }
+              return { success: true, credentials: creds, message: '登录成功' }
+            }
+            // C3/H4: a DIFFERENT account scanned. Never overwrite the saved
+            // credentials — stash them pending panel confirmation; the
+            // existing poll loop keeps running with the old account.
+            this.pendingCreds = creds
+            this.pairingMessage = '检测到新账号扫码，等待面板确认'
+            this.status = 'polling'
+            this.ctx.emit('wechat/pair-pending', {
+              userId: creds.ilinkUserId ?? null,
+              accountId: creds.accountId ?? null,
+            })
+            return { success: true, credentials: creds, message: '检测到新账号扫码，等待面板确认' }
           }
-          await opts.onConfirmed(creds)
-          this.status = 'polling'
-          // Product event: the pairer's WeChat id is now the trust anchor —
-          // the bridge node reacts with a first-run welcome message.
-          if (creds.ilinkUserId) {
-            this.ctx.emit('wechat/paired', { userId: creds.ilinkUserId, accountId: creds.accountId ?? null })
-          }
-          return { success: true, credentials: creds, message: '登录成功' }
+          case 'scaned_but_redirect':
+            // H1: only follow redirects to trusted hosts.
+            baseUrl = sanitizeBaseUrl(st.redirect_host, baseUrl, this.c.trustedBaseHosts)
+            opts.onStatus?.('scaned_but_redirect')
+            break
+          case 'binded_redirect':
+            // Already bound: existing local credentials remain valid.
+            this.status = 'polling'
+            return { success: true, credentials: undefined, message: '已绑定，沿用现有凭据' }
+          case 'expired':
+            opts.onStatus?.('expired')
+            qr = await fetchQrCode({ baseUrl, botType: opts.botType })
+            emitQr(qr)
+            break
+          case 'need_verifycode':
+            opts.onStatus?.('need_verifycode')
+            break
+          case 'verify_code_blocked':
+            opts.onStatus?.('verify_code_blocked')
+            break
+          default:
+            opts.onStatus?.(st.status)
         }
-        case 'scaned_but_redirect':
-          baseUrl = st.redirect_host ? `https://${st.redirect_host}` : baseUrl
-          opts.onStatus?.('scaned_but_redirect')
-          break
-        case 'binded_redirect':
-          // Already bound: existing local credentials remain valid.
-          this.status = 'polling'
-          return { success: true, credentials: undefined, message: '已绑定，沿用现有凭据' }
-        case 'expired':
-          opts.onStatus?.('expired')
-          qr = await fetchQrCode({ baseUrl, botType: opts.botType })
-          emitQr(qr)
-          break
-        case 'need_verifycode':
-          opts.onStatus?.('need_verifycode')
-          break
-        case 'verify_code_blocked':
-          opts.onStatus?.('verify_code_blocked')
-          break
-        default:
-          opts.onStatus?.(st.status)
+        await new Promise((r) => setTimeout(r, pollIntervalMs))
       }
-      await new Promise((r) => setTimeout(r, pollIntervalMs))
+      // Timeout (M3): keep 'polling' when credentials exist — a timed-out
+      // pairing must not fake an unauthenticated gateway.
+      const creds = await this.resolveCredentials()
+      this.status = creds?.botToken ? 'polling' : 'unauthenticated'
+      return { success: false, message: '登录超时' }
+    } catch (err) {
+      // M3: any pairing exception (including fetchQrCode failures) must be
+      // contained — log, reset status per credentials, drop the stale QR.
+      this.ctx.logger.warn('[dsh-wechat-bridge] pairing failed: %s', String(err))
+      const creds = await this.resolveCredentials()
+      this.status = creds?.botToken ? 'polling' : 'unauthenticated'
+      this.pairingQr = null
+      return { success: false, message: `配对失败: ${err instanceof Error ? err.message : String(err)}` }
+    } finally {
+      // Defensive: never leave the gateway stuck in 'pairing'.
+      if (this.status === 'pairing') {
+        const creds = await this.resolveCredentials()
+        this.status = creds?.botToken ? 'polling' : 'unauthenticated'
+      }
     }
-    this.status = 'unauthenticated'
-    return { success: false, message: '登录超时' }
   }
 
   /**
@@ -329,6 +460,7 @@ export class WechatGateway extends Service {
     }
     void this.runPairing({
       timeoutMs: 10 * 60_000,
+      startPolling: true,
       onQr: (qr) => {
         void QRCode.toString(qr.scanData, { type: 'svg', margin: 2, width: 420 })
           .then((svg) => {
@@ -340,9 +472,12 @@ export class WechatGateway extends Service {
         this.pairingMessage = String(status)
       },
       onConfirmed: async (creds) => {
+        // Persisting here; the poll-loop start/restart is handled by the
+        // confirmed branch through the unified entry (M2).
         await this.saveCredentials(creds)
-        void this.pollLoop(creds)
       },
+    }).catch((err) => {
+      this.ctx.logger.warn('[dsh-wechat-bridge] pairing failed: %s', String(err))
     })
     // Wait until the first QR is available.
     const deadline = Date.now() + 15_000
@@ -353,13 +488,92 @@ export class WechatGateway extends Service {
     return this.pairingQr
   }
 
+  /**
+   * C3: accept the pending pairing — persist the stashed credentials, stop
+   * the old poll loop (abort + await full exit), then restart polling with
+   * the new account through the unified entry.
+   */
+  async confirmPairing(): Promise<boolean> {
+    if (!this.pendingCreds) return false
+    const creds = this.pendingCreds
+    this.pendingCreds = null
+    await this.saveCredentials(creds)
+    // M2: the old loop must be fully torn down before the new one starts.
+    await this.stopPollLoop()
+    this.status = 'polling'
+    if (creds.ilinkUserId) {
+      this.ctx.emit('wechat/paired', { userId: creds.ilinkUserId, accountId: creds.accountId ?? null })
+    }
+    this.pairingMessage = ''
+    void this.startPollLoop(creds)
+    return true
+  }
+
+  /** C3: reject the pending pairing — discard the stashed credentials. */
+  rejectPairing(): boolean {
+    if (!this.pendingCreds) return false
+    this.pendingCreds = null
+    this.pairingMessage = ''
+    return true
+  }
+
   // ---------------------------------------------------------------- poll loop
 
-  private pollRunning = false
+  /**
+   * M2: unified polling entry — the ONLY place a poll loop is started. If a
+   * loop is already running it is superseded (generation bump + in-flight
+   * abort) and awaited to full exit before the fresh loop starts, so two
+   * loops can never run concurrently, even across a credential switch.
+   * Returns the new loop's lifetime promise (callers normally `void` it).
+   */
+  private startPollLoop(creds: WechatCredentials): Promise<void> {
+    this.pollGeneration += 1
+    const gen = this.pollGeneration
+    const prev = this.pollLoopPromise
+    this.pollAbort?.abort()
+    const next = (async () => {
+      if (prev) await prev
+      if (gen !== this.pollGeneration) return // superseded while waiting
+      await this.runPollLoop(creds, gen)
+    })()
+    this.pollLoopPromise = next
+    void next.catch((err) => this.ctx.logger.warn('[dsh-wechat-bridge] poll loop error: %s', String(err)))
+    return next
+  }
 
-  private async pollLoop(creds: WechatCredentials): Promise<void> {
+  /** M2: stop the current loop and wait for its full exit (no replacement). */
+  private async stopPollLoop(): Promise<void> {
+    this.pollGeneration += 1
+    const prev = this.pollLoopPromise
+    this.pollAbort?.abort()
+    if (prev) await prev
+  }
+
+  /**
+   * M2: in-loop sleep that resolves EARLY when the loop is superseded
+   * (generation bumped by a stop/start) — a credential switch must not be
+   * delayed by a pending 10-minute pause.
+   */
+  private pollSleep(ms: number): Promise<void> {
+    const started = this.pollGeneration
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      const iv = setInterval(() => {
+        if (this.pollGeneration !== started) {
+          clearTimeout(timer)
+          clearInterval(iv)
+          resolve()
+        }
+      }, 250)
+      timer.unref?.()
+      iv.unref?.()
+    })
+  }
+
+  private async runPollLoop(creds: WechatCredentials, gen: number): Promise<void> {
     if (this.pollRunning) return
     this.pollRunning = true
+    this.status = 'polling'
     try {
       let baseUrl = creds.baseUrl || this.c.baseUrl
       let token = creds.botToken
@@ -370,10 +584,11 @@ export class WechatGateway extends Service {
       let buf = savedCursor !== null && savedCursor.accountId === accountId ? savedCursor.buf : ''
       let failures = 0
       while (!this.stopPolling) {
+        if (gen !== this.pollGeneration) break // superseded by a newer loop
         if (failures >= 3) {
           this.status = 'paused'
           this.ctx.logger.warn('[dsh-wechat-bridge] 3 次连续失败，暂停 30s 后重试')
-          await new Promise((r) => setTimeout(r, 30_000))
+          await this.pollSleep(30_000)
           failures = 0
         }
         this.pollAbort = new AbortController()
@@ -384,6 +599,7 @@ export class WechatGateway extends Service {
             getUpdatesBuf: buf,
             abortSignal: this.pollAbort.signal,
           })
+          if (gen !== this.pollGeneration) break
           const wasDown = failures > 0
           failures = 0
           if (wasDown) {
@@ -392,39 +608,48 @@ export class WechatGateway extends Service {
             this.ctx.emit('wechat/back-online')
             debugLogEvent({ event: 'poll-recovered' })
           }
-          const errcode = batch.errcode
-          if (errcode === SESSION_EXPIRED_ERRCODE || (errcode === -2 && /unknown error/i.test(batch.errmsg ?? ''))) {
-            // -14 / -2+unknown: session expiry — re-resolve credentials so a
-            // fresh pairing (panel/CLI) takes effect without another restart.
-            // The continuation cursor is KEPT (official monitor semantics): a
+          // M1: unified dispatch — session-expiry/stale-token (-14, -2+unknown
+          // error, -2+prepare failed) → 10-min pause; rate-limit (-12) → 30s;
+          // any other negative → 5s retry. A bare { ret: -12 } (no errcode)
+          // can never fall into the success path.
+          const cls = classifyPollBatch(batch)
+          if (cls === 'session-expired') {
+            // Session expiry — re-resolve credentials so a fresh pairing
+            // (panel/CLI) takes effect without another restart. The
+            // continuation cursor is KEPT (official monitor semantics): a
             // stale-token pause is not a reason to replay or skip messages.
             // Only an actual identity change (re-pair) resets the cursor.
             this.status = 'paused'
             this.pairingMessage = '会话过期，若重新扫码配对将自动恢复'
-            debugLogEvent({ event: 'poll-session-expired', errcode, errmsg: batch.errmsg })
-            this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(%s)，10 分钟后重试', errcode)
-            await new Promise((r) => setTimeout(r, 10 * 60_000))
+            debugLogEvent({ event: 'poll-session-expired', ret: batch.ret, errcode: batch.errcode, errmsg: batch.errmsg })
+            this.ctx.logger.warn('[dsh-wechat-bridge] 会话过期(ret=%s errcode=%s)，10 分钟后重试', batch.ret, batch.errcode)
+            await this.pollSleep(10 * 60_000)
+            if (gen !== this.pollGeneration) break // superseded during the pause
             const fresh = await this.resolveCredentials()
             if (fresh?.botToken) {
               const identityChanged = fresh.botToken !== token
+              if (identityChanged) {
+                // M2: an actual credential switch mid-poll — tear down this
+                // loop (it is superseded) and restart via the unified entry.
+                // The old identity's cursor must not leak into the new loop.
+                this.pollCursorStore.save(null)
+                void this.startPollLoop(fresh)
+                return
+              }
               baseUrl = fresh.baseUrl || this.c.baseUrl
               token = fresh.botToken
               accountId = fresh.accountId ?? accountId
-              if (identityChanged) {
-                buf = ''
-                this.pollCursorStore.save(null)
-              }
             }
             continue
           }
-          if (errcode === RATE_LIMIT_ERRCODE) {
+          if (cls === 'rate-limit') {
             this.status = 'paused'
-            debugLogEvent({ event: 'poll-rate-limited' })
+            debugLogEvent({ event: 'poll-rate-limited', ret: batch.ret, errcode: batch.errcode })
             await new Promise((r) => setTimeout(r, 30_000))
             continue
           }
-          if (errcode !== undefined && errcode < 0) {
-            debugLogEvent({ event: 'poll-negative-errcode', errcode, errmsg: batch.errmsg })
+          if (cls === 'generic-negative') {
+            debugLogEvent({ event: 'poll-negative-errcode', ret: batch.ret, errcode: batch.errcode, errmsg: batch.errmsg })
             await new Promise((r) => setTimeout(r, 5_000))
             continue
           }
@@ -436,6 +661,7 @@ export class WechatGateway extends Service {
           this.handleBatch(batch.msgs ?? [])
           this.status = 'polling'
         } catch (err) {
+          if (gen !== this.pollGeneration) break
           // HTTP 403 = the iLink exclusive lock: another poller owns this
           // token. Stop loudly instead of retrying forever.
           if (/status=403/.test(String(err))) {
@@ -454,7 +680,7 @@ export class WechatGateway extends Service {
           this.pollAbort = null
         }
       }
-      this.status = 'stopped'
+      if (gen === this.pollGeneration) this.status = 'stopped'
     } finally {
       this.pollRunning = false
     }
@@ -484,7 +710,8 @@ export class WechatGateway extends Service {
         event: 'inbound',
         msgId: id ?? null,
         from: senderId,
-        ctxToken: msg.context_token ?? null,
+        // F5: log only the trailing 12 chars of the context token.
+        ctxToken: redactContextToken(msg.context_token),
         runId: msg.run_id ?? null,
         itemTypes: (msg.item_list ?? []).map((i) => i.type),
         text: (text ?? '').slice(0, 120) || null,
@@ -492,14 +719,15 @@ export class WechatGateway extends Service {
         // media shape — full-fidelity copies go to media-captures.jsonl.
         mediaItems: (msg.item_list ?? [])
           .filter((item) => item.type === ITEM_IMAGE || item.type === ITEM_FILE || item.type === ITEM_VIDEO)
-          .map((item) => JSON.stringify(item).slice(0, 1200)),
+          .map((item) => JSON.stringify(redactItemForCapture(item)).slice(0, 1200)),
       })
       // Full-fidelity media capture: complete inbound media items (verbatim,
       // no truncation) for byte-level shape comparison — the ground truth for
-      // the outbound media gate (docs/porting-notes.md §6.1).
+      // the outbound media gate (docs/porting-notes.md §6.1). AES keys are
+      // redacted before the item leaves the gateway (F5).
       for (const item of msg.item_list ?? []) {
         if (item.type === ITEM_IMAGE || item.type === ITEM_FILE || item.type === ITEM_VIDEO) {
-          debugLogMediaCapture({ msgId: id ?? null, item })
+          debugLogMediaCapture({ msgId: id ?? null, item: redactItemForCapture(item) })
         }
       }
       this.ctx.emit('wechat/message', payload)
@@ -513,7 +741,7 @@ export class WechatGateway extends Service {
 
   /** Download and decrypt an inbound image (M3: image-in-session). */
   async downloadImage(item: ImageItem): Promise<{ data: Buffer; ext: string }> {
-    return downloadImageMedia({ item, cdnBaseUrl: this.c.cdnBaseUrl })
+    return downloadImageMedia({ item, cdnBaseUrl: this.c.cdnBaseUrl, extraTrustedHosts: this.c.trustedMediaHosts })
   }
 
   /** Send one structured message item (text or bot progress card). */
@@ -655,6 +883,7 @@ export class WechatGateway extends Service {
         filekey,
         cdnBaseUrl: this.c.cdnBaseUrl,
         aeskey,
+        extraTrustedHosts: this.c.trustedMediaHosts,
       })
       if (!downloadParam) {
         return { ok: false, errmsg: 'CDN upload returned no x-encrypted-param', retryable: false }

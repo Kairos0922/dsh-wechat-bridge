@@ -19,17 +19,31 @@ export interface GatewayConfig {
     cdnBaseUrl?: string;
     token?: string;
     accountId?: string;
+    /**
+     * H1: extra hostnames (besides ilinkai.weixin.qq.com / *.weixin.qq.com)
+     * accepted by base-url validation. Exact hostname match, case-insensitive.
+     */
+    trustedBaseHosts?: string[];
+    /**
+     * F4: extra hostnames (besides novac2c.cdn.weixin.qq.com / *.cdn.weixin.qq.com)
+     * accepted for CDN media download/upload URLs.
+     */
+    trustedMediaHosts?: string[];
 }
 export declare const Config: z<Schemastery.ObjectS<{
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
     token: z<string, string>;
     accountId: z<string, string>;
+    trustedBaseHosts: z<string[], string[]>;
+    trustedMediaHosts: z<string[], string[]>;
 }>, Schemastery.ObjectT<{
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
     token: z<string, string>;
     accountId: z<string, string>;
+    trustedBaseHosts: z<string[], string[]>;
+    trustedMediaHosts: z<string[], string[]>;
 }>>;
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped';
 export interface LoginQrOptions {
@@ -56,6 +70,18 @@ export interface LoginQrResult {
 }
 export interface ResolvedGatewayConfig extends Required<GatewayConfig> {
 }
+/**
+ * F5: log only the trailing 12 chars of a context token — the debug sinks
+ * are plaintext JSONL under $DSH_HOME and must not carry full tokens.
+ */
+export declare function redactContextToken(token: string | null | undefined): string | null;
+/**
+ * F5: deep-copy the media-relevant layers of an inbound item (never mutate
+ * the live object) and replace AES keys with '<redacted>' before any log or
+ * capture sink sees them. Walks only the KNOWN layers — image/file/voice/
+ * video items plus their media/thumb_media sub-objects — no full recursion.
+ */
+export declare function redactItemForCapture(item: MessageItem): MessageItem;
 declare module '@deepseek-ai/cordis' {
     interface Context {
         /** The iLink gateway service provided by the wechat-gateway plugin. */
@@ -71,6 +97,15 @@ declare module '@deepseek-ai/cordis' {
             userId: string;
             accountId: string | null;
         }): void;
+        /**
+         * A DIFFERENT account scanned the QR while another account is paired.
+         * The gateway does NOT switch credentials — it awaits the panel's
+         * confirmPairing() / rejectPairing() (C3/H4).
+         */
+        'wechat/pair-pending'(payload: {
+            userId: string | null;
+            accountId: string | null;
+        }): void;
         /** The long-poll recovered after consecutive failures. */
         'wechat/back-online'(): void;
     }
@@ -81,11 +116,15 @@ export declare class WechatGateway extends Service {
         cdnBaseUrl: z<string, string>;
         token: z<string, string>;
         accountId: z<string, string>;
+        trustedBaseHosts: z<string[], string[]>;
+        trustedMediaHosts: z<string[], string[]>;
     }>, Schemastery.ObjectT<{
         baseUrl: z<string, string>;
         cdnBaseUrl: z<string, string>;
         token: z<string, string>;
         accountId: z<string, string>;
+        trustedBaseHosts: z<string[], string[]>;
+        trustedMediaHosts: z<string[], string[]>;
     }>>;
     /** Pull the credentials service in from sibling loader entries. */
     static inject: string[];
@@ -104,6 +143,21 @@ export declare class WechatGateway extends Service {
         errmsg?: string;
         at: number;
     } | null;
+    /** Full stashed credentials of the pending pairing (kept private). */
+    private pendingCreds;
+    /**
+     * C3: a pairing awaiting panel confirmation. Only the pairer's ids are
+     * exposed — the full credentials stay private until confirmPairing().
+     */
+    get pendingPair(): {
+        userId: string | null;
+        accountId: string | null;
+    } | null;
+    private pollRunning;
+    /** Bumped on every stop/start so a superseded loop exits promptly. */
+    private pollGeneration;
+    /** Lifetime promise of the current loop (its wrapper chain). */
+    private pollLoopPromise;
     private typingTickets;
     private ticketRetryAt;
     private ticketBackoffMs;
@@ -134,8 +188,31 @@ export declare class WechatGateway extends Service {
         svg: string;
         scanData: string;
     }>;
-    private pollRunning;
-    private pollLoop;
+    /**
+     * C3: accept the pending pairing — persist the stashed credentials, stop
+     * the old poll loop (abort + await full exit), then restart polling with
+     * the new account through the unified entry.
+     */
+    confirmPairing(): Promise<boolean>;
+    /** C3: reject the pending pairing — discard the stashed credentials. */
+    rejectPairing(): boolean;
+    /**
+     * M2: unified polling entry — the ONLY place a poll loop is started. If a
+     * loop is already running it is superseded (generation bump + in-flight
+     * abort) and awaited to full exit before the fresh loop starts, so two
+     * loops can never run concurrently, even across a credential switch.
+     * Returns the new loop's lifetime promise (callers normally `void` it).
+     */
+    private startPollLoop;
+    /** M2: stop the current loop and wait for its full exit (no replacement). */
+    private stopPollLoop;
+    /**
+     * M2: in-loop sleep that resolves EARLY when the loop is superseded
+     * (generation bumped by a stop/start) — a credential switch must not be
+     * delayed by a pending 10-minute pause.
+     */
+    private pollSleep;
+    private runPollLoop;
     private handleBatch;
     /** Download and decrypt an inbound image (M3: image-in-session). */
     downloadImage(item: ImageItem): Promise<{

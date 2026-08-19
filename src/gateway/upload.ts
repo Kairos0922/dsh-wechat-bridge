@@ -19,6 +19,7 @@ import {
   UPLOAD_MEDIA_VIDEO,
   type MessageItem,
 } from './types.ts'
+import { assertCdnUrl } from './types.ts'
 
 /** Encrypt buffer with AES-128-ECB (PKCS7 padding is the default). */
 export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
@@ -60,6 +61,9 @@ export function encodeMediaAesKey(aeskey: Buffer): string {
  * Upload one buffer to the Weixin CDN with AES-128-ECB encryption.
  * Retries up to UPLOAD_MAX_RETRIES on server errors; 4xx aborts immediately
  * (official cdn-upload.ts semantics).
+ *
+ * F4: the final POST URL (upload_full_url or the cdnBaseUrl-built URL) must
+ * pass assertCdnUrl — the upload CDN shares the *.cdn.weixin.qq.com family.
  */
 export async function uploadBufferToCdn(params: {
   buf: Buffer
@@ -68,6 +72,7 @@ export async function uploadBufferToCdn(params: {
   filekey: string
   cdnBaseUrl: string
   aeskey: Buffer
+  extraTrustedHosts?: readonly string[]
 }): Promise<{ downloadParam: string }> {
   const { buf, uploadFullUrl, uploadParam, filekey, cdnBaseUrl, aeskey } = params
   const ciphertext = encryptAesEcb(buf, aeskey)
@@ -80,13 +85,14 @@ export async function uploadBufferToCdn(params: {
   } else {
     throw new Error('CDN upload URL missing (need upload_full_url or upload_param)')
   }
+  const trustedCdnUrl = assertCdnUrl(cdnUrl, params.extraTrustedHosts).toString()
 
   let downloadParam: string | undefined
   let lastError: unknown
 
   for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(cdnUrl, {
+      const res = await fetch(trustedCdnUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: new Uint8Array(ciphertext),

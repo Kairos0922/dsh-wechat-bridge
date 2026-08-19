@@ -35,6 +35,9 @@ export declare function encodeMediaAesKey(aeskey: Buffer): string;
  * Upload one buffer to the Weixin CDN with AES-128-ECB encryption.
  * Retries up to UPLOAD_MAX_RETRIES on server errors; 4xx aborts immediately
  * (official cdn-upload.ts semantics).
+ *
+ * F4: the final POST URL (upload_full_url or the cdnBaseUrl-built URL) must
+ * pass assertCdnUrl — the upload CDN shares the *.cdn.weixin.qq.com family.
  */
 export declare function uploadBufferToCdn(params: {
     buf: Buffer;
@@ -43,6 +46,7 @@ export declare function uploadBufferToCdn(params: {
     filekey: string;
     cdnBaseUrl: string;
     aeskey: Buffer;
+    extraTrustedHosts?: readonly string[];
 }): Promise<{
     downloadParam: string;
 }>;
