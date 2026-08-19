@@ -14,6 +14,14 @@
     "bridge"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kairos0922/dsh-wechat-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kairos0922/dsh-wechat-bridge/issues"
+  },
+  "homepage": "https://github.com/Kairos0922/dsh-wechat-bridge#readme",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -25,12 +33,12 @@
   "files": [
     "lib",
     "cordis.patch.yml",
-    "scripts",
+    "scripts/login.mjs",
     "README.md",
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

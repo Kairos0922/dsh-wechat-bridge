@@ -1,2 +1,10 @@
 node_modules/
 state/
+.DS_Store
+*.log
+.env
+.env.*
+coverage/
+dist/
+*.tsbuildinfo
+.credentials.yaml

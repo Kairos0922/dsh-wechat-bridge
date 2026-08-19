@@ -3,7 +3,7 @@
 > 本文是 dsh-wechat-bridge 对腾讯 iLink 微信机器人协议的**正向规格**——常量、
 > 消息结构、媒体流程与错误语义的权威定义。维护者升级上游
 > [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 时按本表逐项
-> diff；历史移植对照与探针矩阵见 [porting-notes.md](porting-notes.md)（维护者内部）。
+> diff；历史移植对照与探针矩阵见 [porting-notes.md](porting-notes.md)。
 
 ## 1. 通道模型
 
@@ -101,8 +101,8 @@ media = {
 | 码 | 语义 | 处置 |
 |---|---|---|
 | `ret: 0` | 成功（ack；**不等于客户端已渲染**） | — |
-| `ret: -2` + `errmsg="prepare failed"` | **stale session（context_token 过期）**——长任务/久无互动后规律出现（2026-08-18 事故即此） | 删除缓存 token → **无 token 重发一次**（iLink 接受降级发送）→ 仍失败则退避重试 |
-| `ret: -2` + `errmsg="unknown error"` | 同上（hermes 分类器同款） | 同上 |
+| `ret: -2` + `errmsg="prepare failed"` | **stale session（context_token 过期）**——长任务/久无互动后规律出现（2026-08-18 事故即此） | **会话过期恢复**：删除缓存 token → **无 token 重发一次**（iLink 接受降级发送）→ 仍失败则退避重试 |
+| `ret: -2` + `errmsg="unknown error"` | 同上（hermes 分类器同款） | 同上（会话过期恢复） |
 | `ret: -2` + `errmsg="rate limited"/"freq limit"`（及 -2 其他文本） | 限流（频率限制） | 退避重试（10s→30s→60s，预算 5 次） |
 | `errcode: -12` | 限流（官方 `RATE_LIMIT_ERRCODE`） | 同上退避 |
 | `errcode: -14` | 会话过期（`SESSION_EXPIRED_ERRCODE`） | 队列整体暂停 60min（对齐官方 session-guard） |
@@ -111,6 +111,10 @@ media = {
 分类实现：`classifySendFailure()`（src/gateway/types.ts）→ `SendResult.failureClass`
 （`stale-session` / `rate-limit` / `session-expired` / `generic`）→ dispatch 层做
 tokenless 恢复（compare-and-delete 防并发刷新被误删），outbox 层做退避。
+
+> **`prepare failed` / `unknown error` 同样进入会话过期恢复**（与 `-14` 同一恢复
+> 路径：tokenless 重发 + 退避，`-14` 额外暂停队列 60min），不是"服务器拒绝"终态——
+> 只读 errmsg 文本分派，禁止把 -2 当形状被拒。
 
 > `ret: -2` 曾被误读为"媒体形状被服务器拒绝"——实际是限流/会话类业务错误
 > （openclaw 官方 issue #216 印证：连续媒体发送触发，paced 即成功；hermes
@@ -134,13 +138,14 @@ tokenless 恢复（compare-and-delete 防并发刷新被误删），outbox 层�
   只记日志，绝不喂给模型。
 - **审批**：危险操作经 `dsh-user-approval` 桥，微信 `/yes` `/no` 或回复编号即决；
   只回答**发起者本人**的待审批请求。
-- **媒体内容**：入站仅接受 CDN 白名单域名；`media_dir` 限定工作区。
+- **媒体内容**：入站媒体仅接受 CDN 域白名单（`*.cdn.weixin.qq.com`）+ HTTPS +
+  30s 超时 + 20MB 上限，**不自动跟随未校验重定向**；`media_dir` 限定工作区。
 
 ## 8. 限流卫生
 
 - 出站最小间隔 `minSendIntervalMs`（默认 5000ms）全局限速；限流类错误（-12 或
   -2 + rate 文本）指数退避 10s→30s→60s（预算 5 次），成功即复位。
-- 无公开限流数字；连续高频发送（探针轰炸）曾触发服务器封禁——生产通道禁止试探性
-  发送，实验走 `scripts/probe-media.mjs`（带 `--consent` 门）+ 用户明示窗口。
+- 无公开限流数字；请避免高频连续发送，可能触发服务端限流——生产通道禁止无许可的
+  试探性发送，实验走 `scripts/probe-media.mjs`（带 `--consent` 门）+ 用户明示窗口。
 - 审批提示（🔐 需要你的确认）发送失败不静默：标记待重推，用户下一条入站消息
   到达（= 通道恢复 + 用户在场）时自动重推，等待窗口内保证送达机会（2026-08-18 起）。

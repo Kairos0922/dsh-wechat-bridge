@@ -1,10 +1,17 @@
 # dsh-wechat-bridge bundle layer: mounts the iLink gateway and the WeChat
 # conversation node as one composed plugin row.
 #
-# `allowFrom` is REQUIRED with no permissive default: an agent that accepts
-# instructions from any WeChat contact is a prompt-injection front door.
-# Messages from non-allowlisted senders are logged and ignored, never fed
-# to the model. See README.zh.md for the full config.
+# Threat model: the effective trust set is `allowFrom` ∪ users confirmed in
+# the Web settings panel ∪ the credential owner. `allowFrom` is REQUIRED with
+# no permissive default: an agent that accepts instructions from any WeChat
+# contact is a prompt-injection front door. Messages outside the trust set are
+# logged and ignored, never fed to the model. With an empty `allowFrom`, only
+# pairing is trusted: the first scanner is trusted automatically (bootstrap),
+# any later scanner must be explicitly confirmed in the Web settings panel, and
+# switching to another account also requires panel confirmation. API endpoints
+# under /api/dsh-wechat-bridge/* are guarded by a browser trust fence (loopback
+# Host check + sec-fetch-site cross-site rejection + Origin same-origin check);
+# non-loopback Hosts always get 403. See README.md "安全模型" for the full model.
 - insert:
     - id: dsh-wechat-bridge
       name: 'dsh-wechat-bridge'

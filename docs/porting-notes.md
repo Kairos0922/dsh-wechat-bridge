@@ -1,6 +1,6 @@
-# 移植对照表（porting notes）——维护者内部
+# 移植对照表（porting notes）
 
-> ⚠️ **本文是维护者内部文档**：上游逐字段移植对照、探针矩阵与过程考古，面向协议
+> ⚠️ **本文是移植对照与过程记录**：上游逐字段移植对照、探针矩阵与过程考古，面向协议
 > 维护与升级 diff。**协议的正向规格见 [protocol.md](protocol.md)**（常量/结构/流程/
 > 错误码，权威定义）；产品文档见 [README](../README.md)。
 >
@@ -53,7 +53,7 @@
 ## 6. CDN 上传（图片/文件外发）— 已实现（P1，`src/gateway/upload.ts` + `gateway/index.ts`）
 
 上游 `src/cdn/upload.ts` + `src/cdn/aes-ecb.ts` + `src/cdn/cdn-upload.ts` + `src/cdn/cdn-url.ts`。
-全流程已逐字段对齐并端到端探针验证（getUploadUrl → CDN 上传 → FILE item → 微信端收到附件）：
+全流程已逐字段对齐并端到端验证（getUploadUrl → CDN 上传 → FILE item → 微信端收到附件）：
 
 1. `getUploadUrl`（`GetUploadUrlReq` 全字段：filekey / media_type / to_user_id / rawsize / rawfilemd5 / filesize / no_need_thumb / aeskey）✅
 2. 本地 AES-128-ECB（PKCS7）加密明文 → 密文尺寸 = `aesEcbPaddedSize(rawsize)` ✅（与入站解密器互验往返一致）
@@ -91,12 +91,11 @@
 > `fileThresholdChars` 默认 **0=关闭**，`/export` `/card` 保留为后端支持后立即可用。
 > 后端升级后按本矩阵重测即可开关。
 
-### §6.1 活体验证追加（2026-08-16 晚间，生产代码路径 `scripts/probe-media.mjs`）
+### §6.1 追加验证（2026-08-16 晚间，生产代码路径 `scripts/probe-media.mjs`）
 
-用**生产同款 lib 产物** + 真实账号凭证，对用户微信实发探针，结论与早间矩阵一致
-并新增关键证据（全部有日志记录）：
+用**生产同款 lib 产物**复测各形状变体，结论与早间矩阵一致并新增关键证据（全部有日志记录）：
 
-| 探针 | 变体 | 服务器 | 端上（手机核对） |
+| 探针 | 变体 | 服务器 | 端上观察 |
 |---|---|---|---|
 | A | 生产形状：upload_param(896字符) + aes_key=base64(hex,44字符) + full_url(绝对) + mid_size | ack (message_id) | **静默丢弃**（未收到） |
 | B | 官方形状：xep(488字符) + aes_key=base64(原始字节,24字符) | ack | **静默丢弃** |
@@ -111,7 +110,7 @@
 | L | mirror + encrypt_type:1 | **prepare failed** | — |
 | J | 官方源码形状修正版（xep + 44字符key + encrypt_type:1 + mid_size，即 hermes/openclaw 真形状） | **prepare failed** | — |
 | M | **hermes-flow 逐字段复刻**（hermes-agent 0.19.0 weixin.py 全流程：client version 2.2.0、base_info 仅 channel_version、caption 先行、xep 引用） | **连 caption 纯文本都 prepare failed** | — |
-| N | **单发判决（用户许可窗口）**：生产形状 + thumb_size/thumb_height/thumb_width/hd_size 尺寸元数据（2026-08-16 完整捕获官方 item 发现我们缺失的唯一字段）+ 新 bot 新鲜 ctx | ack (message_id) | **静默丢弃**（新 bot 身份、手机核对） |
+| N | **单发判决**：生产形状 + thumb_size/thumb_height/thumb_width/hd_size 尺寸元数据（2026-08-16 完整捕获官方 item 发现我们缺失的唯一字段）+ 新 bot 新鲜 ctx | ack (message_id) | **静默丢弃**（新 bot 身份） |
 
 - **item 级字段二分**：官方客户端入站 item 带 create_time_ms/update_time_ms/is_completed，
   但 **bot 发送带任一字段即 prepare failed**——服务器对 bot 出站媒体 item 有独立校验，
@@ -128,7 +127,7 @@
   服务器签发 upload_param = base64( base64url( 495–672 字节二进制，请求间可变 ) )——两者
   结构不同，客户端渲染器只认客户端生成结构；服务器侧两种结构均可下载（自下载闭环均
   200+解密一致），说明门禁在**客户端渲染/取流侧**，不在 CDN。
-- **入站方向实测通过**：用户手机发照片 → bot 经 full_url 下载 + AES 解密落盘成功
+- **入站方向实测通过**：bot 经 full_url 下载 + AES 解密落盘成功
   （`media/<session>/wechat-*.jpg` 为真实 JPEG）——M3 链路生产端到端可用。
 
 **判定边界（终局，2026-08-16 全证据链）**：bot→微信 外发图片被客户端渲染门禁锁定——
@@ -145,10 +144,10 @@
 > ⚠️ **§6 与 §6.1 的"客户端渲染门禁"结论错误，本节推翻之。** 历史矩阵保留作考古，
 > 判定以本节为准。
 
-**单发验证（用户开窗口，官方形状一发即中）**：
+**单发验证（官方形状一发即中）**：
 `xep(CDN 上传响应头) + aes_key=base64(hex字符串)44字符 + encrypt_type:1 + mid_size`，
 openclaw 2.4.6 头环境（iLink-App-ClientVersion=132102、base_info.channel_version=2.4.6、
-无 context_token）→ 服务器 ack（message_id）→ **手机端正常显示**。
+无 context_token）→ 服务器 ack（message_id）→ **端上正常显示**。
 
 **根因定案（为什么本地此前全灭）**：
 1. **`encrypt_query_param` 必须用 CDN 上传响应头 `x-encrypted-param`**，本地生产形状用的
@@ -160,7 +159,7 @@ openclaw 2.4.6 头环境（iLink-App-ClientVersion=132102、base_info.channel_ve
    解密失败（hermes 源码注释"grey boxes"同因；本地 B 变体"无法下载/已过期"即此）。
 5. **`ret=-2` 是限流/会话类业务错误，不是形状被拒**——openclaw 官方 issue #216
    （连续媒体发送触发 ret=-2，paced 即成功）+ hermes 源码（RATE_LIMIT_ERRCODE=-2，
-   errmsg="unknown error" = stale session）双重印证。探针 D–M 的连续轰炸触发的正是它。
+   errmsg="unknown error" = stale session）双重印证。探针 D–M 的连续发送触发的正是它。
 6. **本地"xep 下载 400"是 bot 侧自拼 URL 缺 `taskid` 参数**（官方 full_url 带 taskid）；
    下载 URL 由客户端构造（客户端生成 taskid），bot 无需也不能生成——不影响发送可行性。
    只读验证（2026-08-17）：upload_param 可作下载参数（200 解密一致），但客户端渲染器
