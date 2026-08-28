@@ -10,17 +10,18 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { validateVideoPath, VIDEO_MAX_BYTES } from '../src/node/commands.ts'
+import { validateFilePath, validateVideoPath, FILE_MAX_BYTES, VIDEO_MAX_BYTES } from '../src/node/commands.ts'
 
 /** Minimal valid MP4 header: size(4) + "ftyp" + brand bytes. */
 const MP4_HEADER = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(8)])
 
-function fakeNode(overrides: { videoRoots?: string[]; cwd?: string; mediaDir?: string } = {}): never {
+function fakeNode(overrides: { videoRoots?: string[]; fileRoots?: string[]; cwd?: string; mediaDir?: string } = {}): never {
   return {
     resolved: {
       cwd: overrides.cwd,
       mediaDir: overrides.mediaDir,
       videoRoots: overrides.videoRoots,
+      fileRoots: overrides.fileRoots,
     },
   } as never
 }
@@ -111,4 +112,59 @@ test('a symlink escaping the root is refused (realpath containment)', () =>
 test('missing files report as not-found', () =>
   withTmpDir((dir) => {
     assert.ok(validateVideoPath(fakeNode({ videoRoots: [dir] }), path.join(dir, 'nope.mp4'))?.includes('不存在'))
+  }))
+
+test('/file: a whitelisted document inside the configured root passes', () =>
+  withTmpDir((dir) => {
+    const doc = writeFile(dir, 'deck.pptx', Buffer.from('x'))
+    assert.equal(validateFilePath(fakeNode({ fileRoots: [dir] }), doc), null)
+    const pdf = writeFile(dir, 'report.PDF', Buffer.from('x'))
+    assert.equal(validateFilePath(fakeNode({ fileRoots: [dir] }), pdf), null, 'case-insensitive extension')
+  }))
+
+test('/file: falls back to videoRoots, then cwd + media dir', () =>
+  withTmpDir((cwd) =>
+    withTmpDir((media) => {
+      const a = writeFile(cwd, 'a.md', Buffer.from('x'))
+      assert.equal(validateFilePath(fakeNode({ cwd, mediaDir: media }), a), null)
+      const b = writeFile(media, 'b.xlsx', Buffer.from('x'))
+      assert.equal(validateFilePath(fakeNode({ videoRoots: [media], cwd: '/nonexistent-root' }), b), null)
+    }),
+  ))
+
+test('/file: rejects paths outside every root and traversal targets', () =>
+  withTmpDir((allowed) =>
+    withTmpDir((elsewhere) => {
+      const doc = writeFile(elsewhere, 'leak.pdf', Buffer.from('x'))
+      assert.ok(validateFilePath(fakeNode({ fileRoots: [allowed] }), doc) !== null)
+      assert.ok(validateFilePath(fakeNode({ fileRoots: [allowed] }), '/etc/hosts') !== null)
+    }),
+  ))
+
+test('/file: rejects non-whitelisted extensions — key material never rides the file channel', () =>
+  withTmpDir((dir) => {
+    const pem = writeFile(dir, 'id_rsa.pem', Buffer.from('x'))
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), pem) !== null)
+    const yml = writeFile(dir, 'config.yaml', Buffer.from('x'))
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), yml) !== null)
+  }))
+
+test('/file: rejects hidden path segments — credential stores stay unreachable', () =>
+  withTmpDir((dir) => {
+    fs.mkdirSync(path.join(dir, '.secrets'))
+    const hidden = writeFile(path.join(dir, '.secrets'), 'creds.md', Buffer.from('x'))
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), hidden)?.includes('隐藏'))
+    const dotfile = writeFile(dir, '.notes.md', Buffer.from('x'))
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), dotfile)?.includes('隐藏'))
+  }))
+
+test('/file: rejects directories and oversized files', () =>
+  withTmpDir((dir) => {
+    const subdir = path.join(dir, 'folder.pdf')
+    fs.mkdirSync(subdir)
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), subdir) !== null)
+    const big = path.join(dir, 'big.zip')
+    fs.writeFileSync(big, Buffer.from('x'))
+    fs.truncateSync(big, FILE_MAX_BYTES + 1)
+    assert.ok(validateFilePath(fakeNode({ fileRoots: [dir] }), big)?.includes('25MB'))
   }))

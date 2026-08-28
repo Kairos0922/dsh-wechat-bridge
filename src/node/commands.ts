@@ -69,6 +69,50 @@ export function validateVideoPath(node: WechatBridgeNode, resolvedPath: string):
   return null
 }
 
+/** Hard size cap for /file uploads — checked before touching the file channel. */
+export const FILE_MAX_BYTES = 25 * 1024 * 1024
+
+/** Document extensions `/file` may send. Everything else is refused. */
+export const FILE_ALLOWED_EXTS = ['.pptx', '.pdf', '.docx', '.xlsx', '.md', '.txt', '.csv', '.zip', '.png', '.jpg', '.jpeg']
+
+/**
+ * Server-side allowlist for /file: whitelisted document extensions, regular
+ * files ≤ 25MB under the configured roots (fileRoots, falling back to the
+ * /video roots default: session cwd + media dir). realpath resolves symlinks
+ * before the containment check, and any hidden path segment (`.dsh`,
+ * `.credentials.yaml`, …) is refused so credential stores can never be
+ * exfiltrated through the file channel. Returns the rejection reason, or
+ * null when sendable. Exported for tests.
+ */
+export function validateFilePath(node: WechatBridgeNode, resolvedPath: string): string | null {
+  if (!FILE_ALLOWED_EXTS.includes(path.extname(resolvedPath).toLowerCase()))
+    return `扩展名不在白名单: ${FILE_ALLOWED_EXTS.join(' ')}`
+  let stat: fs.Stats
+  let real: string
+  try {
+    stat = fs.statSync(resolvedPath)
+    real = fs.realpathSync(resolvedPath)
+  } catch {
+    return `文件不存在: ${resolvedPath}`
+  }
+  if (!stat.isFile()) return '目标不是普通文件'
+  if (stat.size > FILE_MAX_BYTES) return `文件超过 25MB 限制（${Math.round(stat.size / 1024 / 1024)}MB）`
+  const roots = (node.resolved.fileRoots ?? node.resolved.videoRoots ?? [node.resolved.cwd ?? process.cwd(), node.resolved.mediaDir ?? defaultMediaDir()])
+    .map((root) => {
+      try {
+        return fs.realpathSync(root)
+      } catch {
+        return null
+      }
+    })
+    .filter((root): root is string => root !== null)
+  const containing = roots.find((root) => real === root || real.startsWith(root + path.sep))
+  if (containing === undefined) return '只允许发送工作区/媒体目录内的文件（可用 fileRoots 配置）'
+  const relSegments = real.slice(containing.length).split(path.sep)
+  if (relSegments.some((seg) => seg.startsWith('.'))) return '隐藏目录/文件不可发送（防止凭据外发）'
+  return null
+}
+
 /** Compact relative time ("刚刚" / "5m 前" / "2h 前" / "3d 前"). */
 function timeAgo(epochMs: number): string {
   const delta = Date.now() - epochMs
@@ -549,6 +593,31 @@ COMMANDS.push(
       }
       await sendTextToPeer(node, peerId, `🎬 正在发送视频 ${path.basename(resolved)}…`, { kind: 'system' })
       node.enqueueMedia(peerId, 'video', resolved, path.basename(resolved))
+    },
+  },
+  {
+    id: 'file',
+    summary: '发送本机文档文件附件（限工作区/媒体目录，≤25MB）',
+    usage: '/file <本地路径>',
+    detail:
+      '把工作区或媒体目录里的文档文件作为微信附件发送（pptx/pdf/docx/xlsx/md/txt/csv/zip/图片，≤25MB）。' +
+      '安全限制：只允许配置根目录（fileRoots，缺省沿用 /video 的根）内的普通文件，' +
+      '隐藏目录一律拒绝，防止任意本机文件或凭据被读取并外发。',
+    run: async (node, peerId, args) => {
+      const target = args[0]
+      if (!target) {
+        await sendTextToPeer(node, peerId, '❌ 用法: /file <本地路径>', { kind: 'system' })
+        return
+      }
+      const resolved = path.isAbsolute(target) ? target : path.join(node.resolved.cwd ?? process.cwd(), target)
+      const rejected = validateFilePath(node, resolved)
+      if (rejected !== null) {
+        await sendTextToPeer(node, peerId, `❌ ${rejected}`, { kind: 'system' })
+        return
+      }
+      const kb = Math.round(fs.statSync(resolved).size / 1024)
+      await sendTextToPeer(node, peerId, `📎 正在发送 ${path.basename(resolved)}（${kb}KB）…`, { kind: 'system' })
+      node.enqueueMedia(peerId, 'file', resolved, path.basename(resolved))
     },
   },
   {
