@@ -52,6 +52,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `/close` | 归档当前会话 |
 | `/yes` `/no` | 审批：同意 / 拒绝最近一次权限请求（只回答你自己的；仅一条待确认时也可回复 1/2） |
 | `/video <路径>` | 把本机视频文件作为微信视频消息发送（仅限工作区 cwd 与媒体目录下的 .mp4 文件，校验扩展名/真实路径/普通文件，≤10MB） |
+| `/file <路径>` | 把本机文档文件作为微信附件发送（pptx/pdf/docx/xlsx/md/txt/csv/zip/图片；限 `fileRoots` 根目录，隐藏目录一律拒绝，≤25MB） |
 | `/export` | 导出当前会话全文为 .md 附件 |
 | `/card` | 把最近一条回复渲染成长图（需 `cardMode: long` + 本机 Chrome） |
 | `/help [命令]` | 查看全部命令或单个命令详情 |
@@ -87,6 +88,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `notifyRejected` | false | 陌生账号尝试联系时通知信任用户 |
 | `thinkingDigestSec` | 120 | 执行中「仍在处理」心跳间隔（秒，0=关闭） |
 | `sendBudgetWindowSec` / `sendBudgetMaxPerWindow` | 60 / 4 | 出站滑动窗口预算（每窗口最多条数，超限排队不丢弃） |
+| `fileRoots` | 沿用 `videoRoots` 缺省 | `/file` 可读取的根目录白名单（服务端硬限制，隐藏路径段一律拒绝） |
 | `allowGroups` | `[]` | 群聊两级白名单（腾讯暂未向机器人开放群事件，待用） |
 
 完整配置见插件源码 `src/node/index.ts` 的 `Config`。

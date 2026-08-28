@@ -88,6 +88,8 @@ export interface ResolvedNodeConfig {
   chromePath?: string
   /** Directories `/video` may read from (undefined = cwd + media dir defaults). */
   videoRoots?: string[]
+  /** Directories `/file` may read from (undefined = videoRoots, then cwd + media dir defaults). */
+  fileRoots?: string[]
 }
 
 /** Default session id prefix for /new-created sessions. */

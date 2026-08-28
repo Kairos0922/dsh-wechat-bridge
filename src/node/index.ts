@@ -83,6 +83,12 @@ export interface NodeConfig {
    * media dir). A hard server-side allowlist — paths outside are refused.
    */
   videoRoots?: string[]
+  /**
+   * Directories `/file` may read from (default: videoRoots, then the session
+   * cwd and the media dir). A hard server-side allowlist — paths outside are
+   * refused, and hidden path segments are always refused.
+   */
+  fileRoots?: string[]
   /** Non-loopback authorities the settings panel may be served under (LAN). */
   webTrustedHosts?: string[]
 }
@@ -115,6 +121,7 @@ export const Config: z<NodeConfig> = z.object({
   notifyRejected: z.boolean().default(false),
   chromePath: z.string(),
   videoRoots: z.array(z.string()),
+  fileRoots: z.array(z.string()),
   webTrustedHosts: z.array(z.string()),
 })
 
@@ -151,6 +158,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     notifyRejected: config.notifyRejected ?? false,
     chromePath: config.chromePath,
     videoRoots: config.videoRoots,
+    fileRoots: config.fileRoots,
   }
   const node = new WechatBridgeNode(ctx, resolved)
   node.attach()
