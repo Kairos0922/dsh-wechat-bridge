@@ -26,12 +26,7 @@ export interface DownloadImageResult {
 /** Per-hop fetch timeout for CDN downloads (F4). */
 export declare const CDN_DOWNLOAD_TIMEOUT_MS = 30000;
 /**
- * Download and decrypt one inbound image. Prefers the server-provided
- * `full_url`, then the client-built URL from `encrypt_query_param`.
- *
- * F4: the URL must pass assertCdnUrl, redirects are followed manually (each
- * hop re-validated, max 3), the body is streamed with a hard size cap and a
- * per-hop 30s timeout. `fetchFn` is injectable for tests.
+ * Download and decrypt one inbound image.
  */
 export declare function downloadImage(params: {
     item: ImageItem;
@@ -39,4 +34,26 @@ export declare function downloadImage(params: {
     extraTrustedHosts?: readonly string[];
     fetchFn?: typeof fetch;
 }): Promise<DownloadImageResult>;
+/**
+ * Common CDN media reference shared by file/video/voice items
+ * (official CDNMedia: encrypt_query_param + full_url + aes_key).
+ */
+export interface CdnMediaRef {
+    encrypt_query_param?: string;
+    full_url?: string;
+    aes_key?: string;
+}
+/**
+ * P1-1: download and decrypt one inbound file/video media object. Same
+ * hardened pipeline as images (assertCdnUrl, manual redirects, streamed size
+ * cap); the decrypted bytes are returned raw — callers name the file.
+ */
+export declare function downloadMediaObject(params: {
+    media: CdnMediaRef;
+    cdnBaseUrl?: string;
+    extraTrustedHosts?: readonly string[];
+    fetchFn?: typeof fetch;
+}): Promise<Buffer>;
+/** Filename → MIME (extension-based; unknown → application/octet-stream). */
+export declare function mimeFromFilename(fileName: string | undefined): string;
 //# sourceMappingURL=media.d.ts.map

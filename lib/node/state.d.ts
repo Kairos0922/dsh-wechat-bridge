@@ -46,6 +46,8 @@ export interface BridgeStateData {
     peerSessions: Record<string, string>;
     /** sessionId → owning peer id (survives restart for reply routing). */
     sessionOwners: Record<string, string>;
+    /** sessionId → whether a trusted WeChat peer may access it. */
+    sessionAccess: Record<string, boolean>;
     /**
      * sessionId → peer id that created it. Survives restart so `/close` and
      * orphan handling can tell who may reclaim a session. Old state files
@@ -85,6 +87,7 @@ export declare class BridgeState {
     private readonly warn;
     private peerSessions;
     private sessionOwners;
+    private sessionAccess;
     private sessionCreators;
     private releasedSessions;
     private contextTokens;
@@ -100,6 +103,9 @@ export declare class BridgeState {
     getSessionOwner(sessionId: string): string | null;
     setSessionOwner(sessionId: string, peerId: string | null): void;
     listSessionOwners(): Array<[string, string]>;
+    isSessionAccessEnabled(sessionId: string): boolean;
+    setSessionAccess(sessionId: string, enabled: boolean): void;
+    listSessionAccess(): Array<[string, boolean]>;
     getContextToken(peerId: string): string | null;
     setContextToken(peerId: string, token: string | null): void;
     listContextTokens(): Array<[string, string]>;

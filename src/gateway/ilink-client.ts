@@ -18,7 +18,6 @@ import { MESSAGE_TYPE_BOT, MESSAGE_STATE_FINISH, type InboundMessage, type Messa
 
 export const LOGIN_BASE_URL = 'https://ilinkai.weixin.qq.com'
 export const DEFAULT_BOT_TYPE = '3'
-export const DEFAULT_BOT_AGENT = 'dsh-wechat-bridge/0.1.0'
 
 export const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000
 export const DEFAULT_API_TIMEOUT_MS = 15_000
@@ -67,10 +66,102 @@ function buildClientVersion(version: string): number {
 
 const ILINK_APP_CLIENT_VERSION: number = buildClientVersion(CHANNEL_VERSION)
 
+/**
+ * P2-2: the default bot_agent follows the REAL package version (it was
+ * hardcoded to 0.1.0 while the package moved on — observability lie).
+ * UA-style `name/version`; for observability only, never auth/routing
+ * (official BaseInfo.bot_agent docs).
+ */
+export const DEFAULT_BOT_AGENT = `dsh-wechat-bridge/${CHANNEL_VERSION}`
+
+/** Maximum length (bytes) of the sanitized bot_agent string (official 256). */
+const BOT_AGENT_MAX_LEN = 256
+
+/**
+ * P2-2: sanitize a bot_agent into a wire-safe UA-style string (port of the
+ * official sanitizeBotAgent, api.ts:132-200). Tokens failing the grammar are
+ * dropped; falls back to DEFAULT_BOT_AGENT when nothing survives or the
+ * result exceeds the length cap after truncation.
+ */
+export function sanitizeBotAgent(raw: string | undefined): string {
+  if (!raw || typeof raw !== 'string') return DEFAULT_BOT_AGENT
+  const trimmed = raw.trim()
+  if (!trimmed) return DEFAULT_BOT_AGENT
+
+  const productRe = /^[A-Za-z0-9_.\-]{1,32}\/[A-Za-z0-9_.+\-]{1,32}$/
+  const commentCharRe = /^[\x20-\x27\x2A-\x7E]{1,64}$/
+
+  // Tokenize on whitespace, re-attaching multi-word (comment) tokens.
+  const rawTokens = trimmed.split(/\s+/)
+  const tokens: string[] = []
+  for (let i = 0; i < rawTokens.length; i += 1) {
+    const tok = rawTokens[i] ?? ''
+    if (tok.startsWith('(') && !tok.endsWith(')')) {
+      let acc = tok
+      while (i + 1 < rawTokens.length && !acc.endsWith(')')) {
+        i += 1
+        acc += ' ' + (rawTokens[i] ?? '')
+      }
+      tokens.push(acc)
+    } else {
+      tokens.push(tok)
+    }
+  }
+
+  const accepted: string[] = []
+  let pendingProduct: string | null = null
+  for (const tok of tokens) {
+    if (tok.startsWith('(') && tok.endsWith(')')) {
+      const inner = tok.slice(1, -1)
+      if (pendingProduct && commentCharRe.test(inner)) {
+        accepted.push(`${pendingProduct} (${inner})`)
+        pendingProduct = null
+      } else {
+        if (pendingProduct) {
+          accepted.push(pendingProduct)
+          pendingProduct = null
+        }
+      }
+      continue
+    }
+    if (pendingProduct) {
+      accepted.push(pendingProduct)
+      pendingProduct = null
+    }
+    if (productRe.test(tok)) {
+      pendingProduct = tok
+    }
+  }
+  if (pendingProduct) accepted.push(pendingProduct)
+
+  if (accepted.length === 0) return DEFAULT_BOT_AGENT
+
+  const joined = accepted.join(' ')
+  if (Buffer.byteLength(joined, 'utf-8') <= BOT_AGENT_MAX_LEN) return joined
+
+  const truncated: string[] = []
+  let len = 0
+  for (const t of accepted) {
+    const add = (truncated.length === 0 ? 0 : 1) + Buffer.byteLength(t, 'utf-8')
+    if (len + add > BOT_AGENT_MAX_LEN) break
+    truncated.push(t)
+    len += add
+  }
+  return truncated.length > 0 ? truncated.join(' ') : DEFAULT_BOT_AGENT
+}
+
+/** P2-2: optional configured bot_agent (set once at gateway boot). */
+let botAgentOverride: string | undefined
+
+/** Install the configured bot_agent (sanitized on every use). */
+export function setBotAgent(raw: string | undefined): void {
+  botAgentOverride = typeof raw === 'string' && raw.trim() ? raw : undefined
+}
+
 function buildBaseInfo(): { channel_version: string; bot_agent: string } {
   return {
     channel_version: CHANNEL_VERSION,
-    bot_agent: DEFAULT_BOT_AGENT,
+    bot_agent: sanitizeBotAgent(botAgentOverride),
   }
 }
 
@@ -107,6 +198,38 @@ function buildHeaders(opts: { token?: string }): Record<string, string> {
 }
 
 // ---------------------------------------------------------------- fetch wrappers
+
+/**
+ * P2-1: classify a fetch-level error into a category for logging/diagnostics
+ * (port of the official classifyFetchError, api.ts:260-288). Covers network
+ * errors only — HTTP 4xx/5xx throw separately in apiPostFetch.
+ */
+export function classifyFetchError(err: unknown): {
+  type: 'dns' | 'tcp' | 'tls' | 'timeout' | 'unknown'
+  description: string
+  code?: string
+} {
+  if (err instanceof Error && err.name === 'AbortError') {
+    return { type: 'timeout', description: 'request timeout' }
+  }
+  const cause = (err as NodeJS.ErrnoException)?.cause
+  const causeCode = (cause as { code?: string } | undefined)?.code ?? ''
+  const causeStr = String(cause ?? err ?? '') + ' ' + String(causeCode)
+  const matchedCode = causeCode || (typeof cause === 'string' ? cause : '')
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(causeStr)) {
+    return { type: 'dns', description: 'DNS resolution failed, check DNS configuration', ...(matchedCode ? { code: matchedCode } : {}) }
+  }
+  if (/ECONNREFUSED/i.test(causeStr)) {
+    return { type: 'tcp', description: 'TCP connection refused', ...(matchedCode ? { code: matchedCode } : {}) }
+  }
+  if (/UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH/i.test(causeStr)) {
+    return { type: 'tcp', description: 'TCP connection timeout or unreachable', ...(matchedCode ? { code: matchedCode } : {}) }
+  }
+  if (/UND_ERR_SOCKET|SSL|TLS|CERT|UNABLE_TO_VERIFY|DEPTH_ZERO/i.test(causeStr)) {
+    return { type: 'tls', description: 'TLS handshake error', ...(matchedCode ? { code: matchedCode } : {}) }
+  }
+  return { type: 'unknown', description: 'network request failed' }
+}
 
 async function apiPostFetch(params: {
   baseUrl: string
@@ -380,34 +503,40 @@ export async function getUploadUrl(params: {
  * Notify the gateway that this channel client is starting. Without it the
  * server may ack sends (ret=0) but never deliver them to the WeChat client —
  * observed after abrupt restarts. Called once at gateway boot.
+ *
+ * P0-3: returns the parsed response so the caller can check `ret` — a
+ * rejected announce must not leave the gateway claiming a healthy 'polling'
+ * state (the official client warns on ret!==0; channel.ts:431-441).
  */
 export async function notifyStart(params: {
   baseUrl: string
   token?: string
   timeoutMs?: number
-}): Promise<void> {
-  await apiPostFetch({
+}): Promise<{ ret?: number; errmsg?: string }> {
+  const rawText = await apiPostFetch({
     baseUrl: params.baseUrl,
     endpoint: 'ilink/bot/msg/notifystart',
     body: JSON.stringify({ base_info: buildBaseInfo() }),
     token: params.token,
     timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
   })
+  return JSON.parse(rawText) as { ret?: number; errmsg?: string }
 }
 
-/** Notify the gateway that this channel client is stopping. */
+/** Notify the gateway that this channel client is stopping. Same ret check. */
 export async function notifyStop(params: {
   baseUrl: string
   token?: string
   timeoutMs?: number
-}): Promise<void> {
-  await apiPostFetch({
+}): Promise<{ ret?: number; errmsg?: string }> {
+  const rawText = await apiPostFetch({
     baseUrl: params.baseUrl,
     endpoint: 'ilink/bot/msg/notifystop',
     body: JSON.stringify({ base_info: buildBaseInfo() }),
     token: params.token,
     timeoutMs: params.timeoutMs ?? DEFAULT_CONFIG_TIMEOUT_MS,
   })
+  return JSON.parse(rawText) as { ret?: number; errmsg?: string }
 }
 
 // ---------------------------------------------------------------- QR login flow
@@ -436,17 +565,30 @@ export interface QrStatusResponse {
   redirect_host?: string
 }
 
-/** Request a login QR code (bot_type 3, the standard WeChat channel). */
+/**
+ * Request a login QR code (bot_type 3, the standard WeChat channel).
+ *
+ * P0-2: `localTokenList` reports already-bound bot tokens (max 10) so the
+ * server can recognize an existing binding and answer `binded_redirect`
+ * instead of issuing a duplicate session (official login-qr.ts:64-90,
+ * getLocalBotTokenList; CHANGELOG 2.3.1).
+ *
+ * P1-2: no short client-side timeout by default (official 2.1.4 removed it —
+ * a slow server response must not fail QR acquisition); apiPostFetch's 60s
+ * whole-exchange budget still applies as the outer bound.
+ */
 export async function fetchQrCode(params: {
   baseUrl?: string
   botType?: string
   timeoutMs?: number
+  localTokenList?: string[]
 }): Promise<QrCodeResponse> {
+  const localTokenList = (params.localTokenList ?? []).filter((t) => t.trim()).slice(0, 10)
   const rawText = await apiPostFetch({
     baseUrl: params.baseUrl ?? LOGIN_BASE_URL,
     endpoint: `ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(params.botType ?? DEFAULT_BOT_TYPE)}`,
-    body: JSON.stringify({}),
-    timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
+    body: JSON.stringify({ local_token_list: localTokenList }),
+    timeoutMs: params.timeoutMs,
   })
   return JSON.parse(rawText) as QrCodeResponse
 }

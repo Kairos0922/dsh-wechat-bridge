@@ -181,3 +181,35 @@ play_length/video_md5）单发即端上正常显示。生产 `buildOutboundMedia
 **残余问题**：语音（voice_item，encode_type/sample_rate 等）仍受限——openclaw 官方
 实测客户端不渲染 bot 语音气泡（#215），且官方无 VOICE 出站实现；`taskid` 生成规则
 未逆向（客户端侧逻辑，bot 不需要）。
+
+## 7. 上游 2.4.8 全量对照（2026-09-09，对照基线：npm dist 2.4.8 含 TS 源码）
+
+> 方法：解包 `@tencent-weixin/openclaw-weixin@2.4.8` 逐文件对照（api/types、
+> monitor、send、inbound、process-message、config-cache、sync-buf、login-qr、
+> cdn/*、media/*、channel.ts、CHANGELOG 全量）。逐项结论存 2026-09-09 会话
+> 分析报告；本节只记**对齐状态变化**。
+
+| 对照点 | 结论 | 处置 |
+|---|---|---|
+| need_verifycode / verify_code_blocked / expired 封顶 | 缺失 → 已补全 | `runPairing`（P0-1） |
+| fetchQrCode local_token_list | 缺失 → 已补全 | P0-2 |
+| notifyStart/Stop ret 检查 | 缺失 → 已补全 | P0-3 |
+| bot_agent 版本失真 + sanitize | 硬编码 0.1.0 → 动态版本 + sanitize + 可配置 | P2-2 |
+| classifyFetchError | 缺失 → 已移植（poll/send 错误带分类） | P2-1 |
+| thumb_rawsize/thumb_rawfilemd5/thumb_filesize | **证伪**：官方 CDN 管线自身不填（api.ts 签名层才有），无行为差异 | skip |
+| SKRouteTag / routeTag | 无线路路由需求 | skip |
+| 入站 file/video 下载 | 缺失 → 已实现（media.ts 共用管线 + mime 表） | P1-1 |
+| voice 无转写静默丢弃 | 已修复（明确告知） | P1-1 |
+| get_bot_qrcode 15s 超时 | → 放宽（对齐官方 2.1.4 移除短超时） | P1-2 |
+| notifyRejected 节流 | 10min → 60min per-sender（对齐 pairing-challenge 语义） | P1-3 |
+| typing ticket 过期窗口弃旧票 | → stale-while-revalidate | P2-7 |
+| 多账号生命周期 / outbound-hooks / debug-mode per-account | 架构裁剪（DSH 单用户单 bot） | skip |
+| pairing 码防暴力 / 人工输码 | 无人工输码路径 | skip |
+| 长轮询 longpolling_timeout_ms | 类型已定义；官方消费位置为 monitor 循环——我方 35s 固定与服务器默认一致，实测无影响 | skip（保留类型） |
+
+已确认对等（无需动）：出站媒体全链路（AES-ECB/padding、getUploadUrl 全字段、
+CDN URL/重试/x-encrypted-param、item 形状）、StreamingMarkdownFilter、
+scaned_but_redirect（我方多信任白名单加固）、binded_redirect、QR 轮询容错、
+contextToken/cursor 持久化、会话熔断守卫、error-notice/progress 开关/
+pairing allowFrom、CHANGELOG 2.4.2（Content-Length）/2.4.3（walk-up）/
+2.4.6（sendMessage 校验）——我方不受影响或已更强。

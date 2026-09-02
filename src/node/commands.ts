@@ -185,13 +185,13 @@ export const COMMANDS: CommandSpec[] = [
   },
   {
     id: 'sessions',
-    summary: '列出我的会话（/use N 切换）',
+    summary: '列出可访问的会话（/use N 切换）',
     usage: '/sessions',
-    detail: '列出由你（当前微信）创建的会话，最近的在最前。/use N 切换到第 N 个。',
+    detail: '列出你创建的会话，以及电脑端已开放微信访问的会话。回复编号即可切换。',
     run: async (node, peerId) => {
-      const sessions = node.sessionsForPeer(peerId)
+      const sessions = node.sessionsAccessibleToPeer(peerId)
       if (sessions.length === 0) {
-        await sendTextToPeer(node, peerId, '📋 你还没有会话。发送 /new [模式] <prompt> 开始。', { kind: 'system' })
+        await sendTextToPeer(node, peerId, '📋 暂无可访问会话。发送 /new [模式] <prompt> 开始。', { kind: 'system' })
         return
       }
       const activeId = node.activeSession(peerId)?.id
@@ -203,7 +203,7 @@ export const COMMANDS: CommandSpec[] = [
         const ago = last ? timeAgo(last.time) : ''
         return `${i + 1}. ${sessionLabel(session)}${ctx}${ago ? ` · ${ago}` : ''}${marker}`
       })
-      await sendTextToPeer(node, peerId, `📋 你的会话（/use N 切换）\n${lines.join('\n')}`, { kind: 'system' })
+      await sendTextToPeer(node, peerId, `📋 可访问会话（/use N 切换）\n${lines.join('\n')}`, { kind: 'system' })
     },
   },
   {
@@ -213,7 +213,7 @@ export const COMMANDS: CommandSpec[] = [
     detail: '切换到 /sessions 列表中的第 N 个会话，之后的普通消息都发给它。',
     run: async (node, peerId, args) => {
       const index = Number(args[0])
-      const sessions = node.sessionsForPeer(peerId)
+      const sessions = node.sessionsAccessibleToPeer(peerId)
       if (!Number.isInteger(index) || index < 1 || index > sessions.length) {
         await sendTextToPeer(node, peerId, `❌ 无效编号。可用: 1–${sessions.length}（/sessions 查看列表）`, { kind: 'system' })
         return

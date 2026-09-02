@@ -77,6 +77,8 @@ export interface NodeConfig {
   notifyMinTurnSec?: number
   /** Delete media/export files older than this many days. */
   mediaRetentionDays?: number
+  /** Coalesce rapid plain-text inbound messages (0 disables). */
+  inboundDebounceMs?: number
   /** Group chats the bridge may serve: room id → allowed senders. */
   allowGroups?: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
@@ -120,6 +122,7 @@ export const Config: z<NodeConfig> = z.object({
   notifyOnComplete: z.boolean().default(false),
   notifyMinTurnSec: z.number().min(0).default(300),
   mediaRetentionDays: z.number().min(0).default(30),
+  inboundDebounceMs: z.number().min(0).default(2000),
   allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
   cardMode: z.union(['off', 'long']).default('off'),
   notifyRejected: z.boolean().default(false),
@@ -157,6 +160,7 @@ function apply(ctx: Context, config: NodeConfig): void {
     notifyOnComplete: config.notifyOnComplete ?? false,
     notifyMinTurnSec: config.notifyMinTurnSec ?? 300,
     mediaRetentionDays: config.mediaRetentionDays ?? 30,
+    inboundDebounceMs: config.inboundDebounceMs ?? 2000,
     allowGroups: config.allowGroups ?? [],
     cardMode: config.cardMode ?? 'off',
     notifyRejected: config.notifyRejected ?? false,

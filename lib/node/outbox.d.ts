@@ -83,7 +83,7 @@ export interface OutboxOptions {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void;
-    onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota', result?: SendResult) => void;
+    onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota' | 'uncertain', result?: SendResult) => void;
     /**
      * Sliding-window send budget: at most `maxPerWindow` sends in any
      * `windowMs` span. Extra entries wait in the queue (never dropped) until

@@ -38,7 +38,8 @@ test('sanitizeState drops malformed fields and never throws', () => {
     pairedUserIds: [],
     peerSessions: {},
     sessionOwners: {},
-    sessionCreators: {},
+    sessionAccess: {},
+     sessionCreators: {},
     releasedSessions: [],
     contextTokens: {},
   })
@@ -169,6 +170,22 @@ test('sessionCreators and releasedSessions persist across instances', () => {
   assert.equal(b.isSessionReleased('wechat-2'), true)
   assert.deepEqual(b.toJSON().releasedSessions, ['wechat-2'])
   b.dispose()
+  fs.rmSync(path.dirname(file), { recursive: true, force: true })
+})
+
+test('sessionAccess persists and validates session ids', () => {
+  const file = fixtureFile()
+  const state = new BridgeState({ file, debounceMs: 1_000_000 })
+  state.setSessionAccess('wechat-1', true)
+  state.setSessionAccess('wechat-2', false)
+  assert.equal(state.isSessionAccessEnabled('wechat-1'), true)
+  assert.equal(state.isSessionAccessEnabled('wechat-2'), false)
+  assert.deepEqual(state.listSessionAccess(), [['wechat-1', true], ['wechat-2', false]])
+  state.dispose()
+  const reloaded = new BridgeState({ file, debounceMs: 1_000_000 })
+  assert.equal(reloaded.isSessionAccessEnabled('wechat-1'), true)
+  assert.equal(reloaded.isSessionAccessEnabled('wechat-2'), false)
+  reloaded.dispose()
   fs.rmSync(path.dirname(file), { recursive: true, force: true })
 })
 
@@ -323,7 +340,7 @@ test('sanitizeState drops illegal session ids and peer ids', () => {
   const data = sanitizeState({
     peerSessions: {
       'a@im.wechat': 'wechat-ok-1',
-      'ok-peer@im.wechat': 'wechat-BAD', // uppercase violates session id rules
+      'ok-peer@im.wechat': 'wechat-BAD', // uppercase is valid for opaque DSH ids
       'ok-peer2@im.wechat': 'evil/../wechat-1', // slash smuggled into a session id
       '': 'wechat-x', // empty peer
       'x@im.wechat': '', // empty session
@@ -339,6 +356,11 @@ test('sanitizeState drops illegal session ids and peer ids', () => {
       'wechat-3': '', // empty owner peer
     },
     pairedUserIds: ['a@im.wechat', '', 'b@im.wechat', `p${'x'.repeat(129)}`, 'bad\rpeer', 'b@im.wechat'],
+    sessionAccess: {
+      'wechat-3': true,
+      'wechat-BAD': true,
+      'wechat-4': 'yes',
+    },
     sessionCreators: {
       'wechat-3': 'c@im.wechat',
       'wechat-BAD': 'd@im.wechat', // illegal session key
@@ -346,11 +368,17 @@ test('sanitizeState drops illegal session ids and peer ids', () => {
     },
     releasedSessions: ['wechat-5', 'wechat-BAD', '', 'wechat-6', 'wechat-6'],
   })
-  assert.deepEqual(data.peerSessions, { 'a@im.wechat': 'wechat-ok-1' })
-  assert.deepEqual(data.sessionOwners, { 'wechat-1': 'a@im.wechat', 'wechat-2': 'b@im.wechat' })
+  assert.deepEqual(data.peerSessions, { 'a@im.wechat': 'wechat-ok-1', 'ok-peer@im.wechat': 'wechat-BAD' })
+  assert.deepEqual(data.sessionOwners, {
+    'wechat-1': 'a@im.wechat',
+    'wechat-BAD_UPPER': 'b@im.wechat',
+    'not-wechat': 'c@im.wechat',
+    'wechat-2': 'b@im.wechat',
+  })
+  assert.deepEqual(data.sessionAccess, { 'wechat-3': true, 'wechat-BAD': true })
   assert.deepEqual(data.pairedUserIds, ['a@im.wechat', 'b@im.wechat']) // deduped
-  assert.deepEqual(data.sessionCreators, { 'wechat-3': 'c@im.wechat' })
-  assert.deepEqual(data.releasedSessions, ['wechat-5', 'wechat-6'])
+  assert.deepEqual(data.sessionCreators, { 'wechat-3': 'c@im.wechat', 'wechat-BAD': 'd@im.wechat' })
+  assert.deepEqual(data.releasedSessions, ['wechat-5', 'wechat-BAD', 'wechat-6'])
 })
 
 // ── LOW version tolerance ────────────────────────────────────────────────────

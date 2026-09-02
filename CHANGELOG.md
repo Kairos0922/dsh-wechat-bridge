@@ -5,6 +5,40 @@
 
 ## [Unreleased]
 
+### 新增（2026-09-09，上游对照 openclaw-weixin 2.4.8 后的借鉴批次）
+
+- **OpenClaw 2.0 投递语义对齐**：发送超时标记 `uncertain`，不盲目重发；仅明确未建立连接的网络失败自动重试；下一次入站携带系统备注。入站文本默认 2 秒防抖合并，媒体立即冲刷；轮询网络重连采用 2/5/15/30 秒退避；停机为出站队列提供 4 秒有界排空。
+- **配置与凭据卫生增强**：拒绝 `baseUrl` 中的凭据型 userinfo/query；allowFrom 条目 24 小时零匹配时告警；重新启动轮询代际时清理 typing ticket；修正游标存储的过时注释（游标本已持久化）。
+
+- **QR 验证码状态机补全**（P0）：`need_verifycode`（CLI stdin / 面板输入框）→
+  携 `verify_code` 立即重轮；`verify_code_blocked` 清码 + 刷新二维码 +
+  3 次封顶；`expired` 刷新计数封顶。此前服务端要求数字校验时配对会挂死到超时。
+- **QR 请求上报 `local_token_list`**（P0）：最多 10 个已有 bot_token，服务器
+  据此识别已绑定 bot（对齐官方 2.3.1，防重复绑定会话）。
+- **notifyStart/Stop 返回检查**（P0）：上线通告被服务器拒绝（ret≠0）时置
+  `paused` 并提示重新配对，不再假装 polling。
+- **入站 file/video 下载落盘**（P1）：复用入站 CDN 管线（assertCdnUrl/手动
+  重定向/流式限长），扩展名 mime 表，路径交给会话；voice 无转写文本不再
+  静默丢弃（明确告知用户改用文字）。
+- **出站媒体支持远程 URL**（P1）：`uploadAndSendMedia` 接受 http(s) URL
+  （私网/环回段拒绝 + 30s 超时 + 上限），能力层就绪。
+- **桥级暂停开关**（P1）：面板一键暂停/恢复；暂停时入站只记日志不进模型，
+  凭据/队列/会话保留。
+- **健康快照**（P2）：`healthSnapshot()` 命名原因（starting/reconnecting/
+  no-inbound-since-boot/…）+ 每条 issue 自带 fix 建议，状态端点与面板展示；
+  纯只读，无任何探针发送。
+- **日志脱敏收敛**（P2）：debug 三个 sink 统一键名脱敏（token/aes_key/
+  typing_ticket/qrcode_img_content…）；`encrypt_query_param` 以长度保留
+  形式掩码（形状对照价值不丢，下载凭据不落盘明文）。
+- **配置 strict 校验**（P2）：未知配置键启动即报错（schemastery 默认静默
+  保留未知键）；新增 `botAgent` 配置（base_info.bot_agent，UA 语法 sanitize，
+  256B 上限——默认值跟随真实包版本，修复硬编码 0.1.0 失真）。
+- **配对治理**（P2）：信任待确认与 bot 身份切换请求 10 分钟 TTL；请求/
+  确认/拒绝/吊销/过期全部审计进 events.jsonl。
+- **typing ticket stale-while-revalidate**（P2）：过期票先服务再后台刷新，
+  消除打字指示中断窗口。
+- 上游对照全程记录见 `docs/porting-notes.md` 与 `docs/protocol.md` §9/§10。
+
 ### 修复
 
 - **长任务出站静默根因修正（2026-08-19 实测）**：`prepare failed` 的归因从

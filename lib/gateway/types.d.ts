@@ -186,6 +186,15 @@ export interface SendResult {
      * transport-level failure (timeout/network/HTTP) — retryable.
      */
     retryable?: boolean;
+    /**
+     * UNCERTAIN outcome (OpenClaw 2.0 alignment, #104632): the request timed
+     * out without a confirmed server result, so the message MAY have been
+     * delivered. Auto-resending would risk the "likely duplicate" upstream
+     * explicitly avoids — the outbox settles the entry instead and the peer's
+     * next inbound message carries a warning note (core.takeUncertainNotice).
+     * When set, `retryable` is false and must not be re-enqueued.
+     */
+    uncertain?: boolean;
 }
 /** Mirror the official WeixinMessage field set (Tencent/openclaw-weixin). */
 export interface InboundMessage {

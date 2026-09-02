@@ -11,11 +11,36 @@
 import { type MessageItem, type UpdatesBatch } from './types.ts';
 export declare const LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com";
 export declare const DEFAULT_BOT_TYPE = "3";
-export declare const DEFAULT_BOT_AGENT = "dsh-wechat-bridge/0.1.0";
 export declare const DEFAULT_LONG_POLL_TIMEOUT_MS = 35000;
 export declare const DEFAULT_API_TIMEOUT_MS = 15000;
 export declare const DEFAULT_CONFIG_TIMEOUT_MS = 10000;
 export declare const QR_LONG_POLL_TIMEOUT_MS = 35000;
+/**
+ * P2-2: the default bot_agent follows the REAL package version (it was
+ * hardcoded to 0.1.0 while the package moved on — observability lie).
+ * UA-style `name/version`; for observability only, never auth/routing
+ * (official BaseInfo.bot_agent docs).
+ */
+export declare const DEFAULT_BOT_AGENT: string;
+/**
+ * P2-2: sanitize a bot_agent into a wire-safe UA-style string (port of the
+ * official sanitizeBotAgent, api.ts:132-200). Tokens failing the grammar are
+ * dropped; falls back to DEFAULT_BOT_AGENT when nothing survives or the
+ * result exceeds the length cap after truncation.
+ */
+export declare function sanitizeBotAgent(raw: string | undefined): string;
+/** Install the configured bot_agent (sanitized on every use). */
+export declare function setBotAgent(raw: string | undefined): void;
+/**
+ * P2-1: classify a fetch-level error into a category for logging/diagnostics
+ * (port of the official classifyFetchError, api.ts:260-288). Covers network
+ * errors only — HTTP 4xx/5xx throw separately in apiPostFetch.
+ */
+export declare function classifyFetchError(err: unknown): {
+    type: 'dns' | 'tcp' | 'tls' | 'timeout' | 'unknown';
+    description: string;
+    code?: string;
+};
 export interface GetUpdatesParams {
     baseUrl: string;
     token?: string;
@@ -115,18 +140,28 @@ export declare function getUploadUrl(params: {
  * Notify the gateway that this channel client is starting. Without it the
  * server may ack sends (ret=0) but never deliver them to the WeChat client —
  * observed after abrupt restarts. Called once at gateway boot.
+ *
+ * P0-3: returns the parsed response so the caller can check `ret` — a
+ * rejected announce must not leave the gateway claiming a healthy 'polling'
+ * state (the official client warns on ret!==0; channel.ts:431-441).
  */
 export declare function notifyStart(params: {
     baseUrl: string;
     token?: string;
     timeoutMs?: number;
-}): Promise<void>;
-/** Notify the gateway that this channel client is stopping. */
+}): Promise<{
+    ret?: number;
+    errmsg?: string;
+}>;
+/** Notify the gateway that this channel client is stopping. Same ret check. */
 export declare function notifyStop(params: {
     baseUrl: string;
     token?: string;
     timeoutMs?: number;
-}): Promise<void>;
+}): Promise<{
+    ret?: number;
+    errmsg?: string;
+}>;
 export interface QrCodeResponse {
     qrcode: string;
     qrcode_img_content?: string;
@@ -140,11 +175,23 @@ export interface QrStatusResponse {
     ilink_user_id?: string;
     redirect_host?: string;
 }
-/** Request a login QR code (bot_type 3, the standard WeChat channel). */
+/**
+ * Request a login QR code (bot_type 3, the standard WeChat channel).
+ *
+ * P0-2: `localTokenList` reports already-bound bot tokens (max 10) so the
+ * server can recognize an existing binding and answer `binded_redirect`
+ * instead of issuing a duplicate session (official login-qr.ts:64-90,
+ * getLocalBotTokenList; CHANGELOG 2.3.1).
+ *
+ * P1-2: no short client-side timeout by default (official 2.1.4 removed it —
+ * a slow server response must not fail QR acquisition); apiPostFetch's 60s
+ * whole-exchange budget still applies as the outer bound.
+ */
 export declare function fetchQrCode(params: {
     baseUrl?: string;
     botType?: string;
     timeoutMs?: number;
+    localTokenList?: string[];
 }): Promise<QrCodeResponse>;
 /**
  * Long-poll the QR status. Network errors and client-side timeouts degrade

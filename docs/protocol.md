@@ -162,3 +162,34 @@ media = {
   试探性发送，实验走 `scripts/probe-media.mjs`（带 `--consent` 门）+ 用户明示窗口。
 - 审批提示（🔐 需要你的确认）发送失败不静默：标记待重推，用户下一条入站消息
   到达（= 通道恢复 + 用户在场）时自动重推，等待窗口内保证送达机会（2026-08-18 起）。
+
+## 9. 投递语义（2026-09-09 定案）
+
+- **at-least-once**：`get_updates_buf` 游标在**拉取确认**时推进（与官方 monitor
+  同构——sync buf 是拉取语义，不是处理确认）；消息级去重由 `seen.json`
+  （按 `message_id`，按 bot 身份隔离）承担。崩溃窗口内最多重复处理一条，
+  绝不跳过。
+- **不确定发送结果**：发送请求超时且没有服务端回执时，结果记为 `uncertain`，不得自动重发（服务端可能已经投递，盲重发会造成重复）。仅 DNS/TCP/TLS 等明确未建立连接的失败可自动重试；下一次该用户入站时，agent 会收到一次系统备注，由对话自行恢复。
+- **会话窗口配额**：服务器对每用户入站窗口允许约 10 条成功出站
+  （`sessionWindowSendMax`），非 must 条目超配额直接跳过；must（最终答案/
+  审批/错误通知）豁免并进入恢复重推队列，用户下一条入站消息触发整段重发。
+
+## 10. 能力 ↔ 证明映射（契约执法）
+
+> 能力行必须由测试或已归档验证记录证明；`verify` 链保证常量与文档不漂移。
+> 维护规则：改 `src/gateway/types.ts` 常量或媒体流程时，同步更新本表，
+> 否则视同破坏契约。
+
+| 能力行 | 证明 |
+|---|---|
+| `ITEM_VIDEO=5`（外发视频） | `test/upload.test.ts`（buildOutboundMediaItem VIDEO）+ 2026-08-17 端上验证（verification-records） |
+| 出站媒体形状（encrypt_type=1、aes_key=base64-of-hex、mid_size/video_size/len） | `test/upload.test.ts` 镜像官方形状 |
+| `ITEM_TOOL_CALL_START/RESULT=11/12` | `test/outbound.test.ts`（常量对齐 + 卡片构建） |
+| StreamingMarkdownFilter 行为等价 | `test/markdown.test.ts`（官方测试向量镜像） |
+| AES-128-ECB PKCS7 padding 公式 | `test/upload.test.ts`（aesEcbPaddedSize） |
+| 入站图片两形态 aeskey 解析 | `test/media.test.ts` |
+| `sanitizeBotAgent` UA 语法/截断 | `test/upstream-alignment.test.ts` |
+| `classifyFetchError` 错误分类 | `test/upstream-alignment.test.ts` |
+| QR `local_token_list` 上报 | `test/upstream-alignment.test.ts` |
+| mime 表覆盖 | `test/upstream-alignment.test.ts` |
+| 远程媒体私网拒绝 | `test/upstream-alignment.test.ts` |

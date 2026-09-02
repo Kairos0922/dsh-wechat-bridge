@@ -72,6 +72,8 @@ export interface NodeConfig {
     notifyMinTurnSec?: number;
     /** Delete media/export files older than this many days. */
     mediaRetentionDays?: number;
+    /** Coalesce rapid plain-text inbound messages (0 disables). */
+    inboundDebounceMs?: number;
     /** Group chats the bridge may serve: room id → allowed senders. */
     allowGroups?: Array<{
         roomId: string;

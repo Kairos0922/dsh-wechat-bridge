@@ -111,6 +111,26 @@ test('session-expiry (-14) pauses the queue for the cooldown', async () => {
   )
 })
 
+test('uncertain send results settle without a duplicate retry', async () => {
+  const dropped: string[] = []
+  const sent: OutboxEntry[] = []
+  const direct = new Outbox({
+    minIntervalMs: 0,
+    backoffSecs: [1],
+    sessionExpiredPauseMs: 1000,
+    send: async (item) => {
+      sent.push(item)
+      return { ok: false, uncertain: true, retryable: false, errmsg: 'timeout' }
+    },
+    onDrop: (item, reason) => dropped.push(`${item.text}:${reason}`),
+  })
+  direct.enqueue(entry({ text: 'once' }))
+  await direct.drain()
+  assert.equal(sent.length, 1)
+  assert.deepEqual(dropped, ['once:uncertain'])
+  assert.equal(direct.pendingCount(), 0)
+})
+
 test('generic failures retry (treated as transport-level) without pausing the queue', async () => {
   let now = 0
   const sleeps: number[] = []

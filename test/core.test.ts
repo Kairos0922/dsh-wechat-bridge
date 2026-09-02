@@ -60,11 +60,15 @@ test('zero cancels the menu', () => {
   node.dispose()
 })
 
-test('dispose clears menus and pending outbox entries without throwing', () => {
+test('dispose clears menus and pending outbox entries without throwing', async () => {
   const node = fakeNode()
   node.registerMenu('peer-a', 'mode', [{ label: 'x', value: 'x' }])
   node.enqueueText('peer-a', 'hello')
   node.dispose()
+  // OpenClaw-2.0-aligned dispose starts a bounded best-effort drain before
+  // dropping anything that remains. The fake node has no sender, so the
+  // drain deadline is the terminal cleanup point.
+  await new Promise<void>((resolve) => setTimeout(resolve, 4_100))
   assert.equal(node.outbox.pendingCount(), 0)
 })
 
@@ -167,6 +171,18 @@ test('natural-language stop: only intercepts while a turn is running', async () 
   agent.status = 'idle'
   await node.handleText('a@im.wechat', '停')
   assert.equal(cancelled, 1, 'idle "停" is not intercepted')
+  node.dispose()
+})
+
+test('shared session binding preserves the original output-route owner', () => {
+  const node = fakeNode()
+  node.setActiveSession('peer-a@im.wechat', 'wechat-shared-1' as never)
+  node.enableSessionWechat('wechat-shared-1')
+  node.setActiveSession('peer-b@im.wechat', 'wechat-shared-1' as never)
+  assert.equal(node.peerOf('wechat-shared-1'), 'peer-a@im.wechat')
+  node.setActiveSession('peer-b@im.wechat', null)
+  assert.equal(node.peerOf('wechat-shared-1'), 'peer-a@im.wechat')
+  assert.equal(node.isSessionWechatEnabled('wechat-shared-1'), true)
   node.dispose()
 })
 

@@ -86,7 +86,7 @@ export interface OutboxOptions {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
-  onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota', result?: SendResult) => void
+  onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota' | 'uncertain', result?: SendResult) => void
   /**
    * Sliding-window send budget: at most `maxPerWindow` sends in any
    * `windowMs` span. Extra entries wait in the queue (never dropped) until
@@ -363,6 +363,17 @@ export class Outbox {
     if (entry.kind === 'file' && entry.fallbackFired) {
       this.backoffIdx = 0
       this.onDrop?.(entry, 'failed', result)
+      return false
+    }
+    // P0 (OpenClaw 2.0 alignment #104632): an UNCERTAIN outcome (send timed
+    // out without a confirmed server result) must NOT auto-retry — the
+    // server may have already delivered, and a resend is the "likely
+    // duplicate" upstream explicitly avoids. The entry settles here; core
+    // records the uncertainty and the peer's next inbound message carries
+    // a warning note instead (takeUncertainNotice).
+    if (result.uncertain === true) {
+      this.backoffIdx = 0
+      this.onDrop?.(entry, 'uncertain', result)
       return false
     }
     // Transport-level (retryable) failures re-enqueue within the attempt

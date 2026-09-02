@@ -70,6 +70,8 @@ export interface Config {
     notifyMinTurnSec?: number;
     /** Delete media/export files older than this many days. */
     mediaRetentionDays?: number;
+    /** Coalesce rapid plain-text inbound messages (0 disables). */
+    inboundDebounceMs?: number;
     /** Group chats the bridge may serve: room id → allowed senders. */
     allowGroups?: Array<{
         roomId: string;
@@ -110,6 +112,8 @@ export interface Config {
     trustedMediaHosts?: string[];
     /** Non-loopback authorities the settings panel may be served under (LAN). */
     webTrustedHosts?: string[];
+    /** P2-2: bot_agent declared in base_info (sanitized; observability only). */
+    botAgent?: string;
 }
 export declare const Config: z<Config>;
 /**

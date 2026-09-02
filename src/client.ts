@@ -73,6 +73,20 @@ const zh = {
   pairedUsers: '已配对用户',
   revoke: '吊销',
   revokeHint: '吊销后对方立即失去访问权，其会话绑定与令牌一并清除。',
+  verifyCodePrompt: '微信验证码',
+  verifyCodeSubmit: '提交验证码',
+  pause: '暂停桥接',
+  resume: '恢复桥接',
+  sessions: 'DSH 会话',
+  sessionsHint: '允许微信操作后，电脑端和微信端可继续使用同一个会话。',
+  sessionId: 'ID',
+  sessionStatus: '状态',
+  sessionActivity: '最近活动',
+  sessionEnabled: '微信可操作',
+  allowWechat: '允许微信操作',
+  stopWechat: '停止微信访问',
+  noSessions: '暂无可用 DSH 会话',
+  sessionActionFailed: '会话权限更新失败',
 }
 
 const en = {
@@ -117,6 +131,20 @@ const en = {
   pairedUsers: 'Paired users',
   revoke: 'Revoke',
   revokeHint: 'Revoking immediately cuts access and clears their session bindings and tokens.',
+  verifyCodePrompt: 'WeChat verify code',
+  verifyCodeSubmit: 'Submit code',
+  pause: 'Pause bridge',
+  resume: 'Resume bridge',
+  sessions: 'DSH sessions',
+  sessionsHint: 'When enabled, the same session can be continued from both desktop and WeChat.',
+  sessionId: 'ID',
+  sessionStatus: 'Status',
+  sessionActivity: 'Recent activity',
+  sessionEnabled: 'WeChat enabled',
+  allowWechat: 'Allow WeChat access',
+  stopWechat: 'Stop WeChat access',
+  noSessions: 'No DSH sessions available',
+  sessionActionFailed: 'Failed to update session access',
 }
 
 // ---------------------------------------------------------------- data
@@ -131,6 +159,10 @@ interface Status {
   ok: boolean
   status: string
   pairingMessage: string
+  /** P0-1: gateway is waiting for the numeric verify code during pairing. */
+  needVerifyCode?: boolean
+  /** P1-6: bridge-level pause (inbound ignored, state preserved). */
+  paused?: boolean
   paired: boolean
   accountId: string | null
   allowFrom: string[]
@@ -140,9 +172,23 @@ interface Status {
   prefs: { provider?: string; model?: string; cwd?: string }
   outbox: { pending: number; pausedUntil: number | null }
   lastSendError: { errcode?: number; errmsg?: string; at: number } | null
+  /** P2-3: named-reason health snapshot (read-only). */
+  health?: {
+    reason: string
+    issues: Array<{ reason: string; fix: string }>
+    pollFailures: number
+    lastInboundAt: number | null
+    lastOutboundAt: number | null
+  }
   pendingPair: { userId: string; accountId: string } | null
   pendingTrustUserId: string | null
   pairedUserIds: string[]
+  sessions?: Array<{ id: string; label: string; status: string; lastActivityAt: number; enabled: boolean }>
+}
+
+function formatSessionActivity(at: number): string {
+  if (!at) return '—'
+  return new Date(at).toLocaleString()
 }
 
 function useStatus(): { status: Status | null; refresh: () => Promise<void> } {
@@ -201,6 +247,11 @@ const css: Record<string, CSSProperties> = {
     background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)',
     font: 'inherit', padding: '0 12px', cursor: 'pointer',
   },
+  input: {
+    height: 36, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
+    font: 'inherit', padding: '0 10px', width: 140,
+  },
   qr: { width: 240, height: 240, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 10 },
   pre: {
     margin: 0, fontSize: 12, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)',
@@ -218,6 +269,7 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
   const [pairing, setPairing] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [verifyCode, setVerifyCode] = useState('')
 
   const pair = async (): Promise<void> => {
     setError(null)
@@ -234,7 +286,7 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
   }
 
   /** POST a pairing-management action and re-poll the status afterwards. */
-  const action = async (path: string, body?: Record<string, string>): Promise<void> => {
+  const action = async (path: string, body?: Record<string, unknown>): Promise<void> => {
     setError(null)
     setBusy(true)
     try {
@@ -262,14 +314,43 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
     { style: css.section },
     h('div', { style: css.row },
       h('h3', { style: css.title }, t('title')),
-      status?.paired
-        ? h('span', { style: css.pill }, t('paired'))
-        : h('span', { style: css.pillError }, t('unpaired')),
+      h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+        status?.paired
+          ? h('span', { style: css.pill }, t('paired'))
+          : h('span', { style: css.pillError }, t('unpaired')),
+        // P1-6: bridge-level pause switch — inbound is dropped while paused,
+        // credentials/queue/sessions preserved.
+        h('button', {
+          style: css.button,
+          disabled: busy,
+          onClick: () => void action('/api/dsh-wechat-bridge/pause', { paused: String(!status?.paused) }),
+        }, status?.paused ? t('resume') : t('pause')),
+      ),
     ),
     h('div', { style: css.card },
       h('div', null,
         h('span', { style: css.label }, `${t('gatewayStatus')} · ${status?.status ?? '…'}`),
         status?.pairingMessage ? h('p', { style: css.muted }, status.pairingMessage) : null,
+        // P0-1: numeric verify code entry — the server demands a code shown
+        // in the scanning WeChat client before the pairing can confirm.
+        status?.needVerifyCode
+          ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 } },
+              h('input', {
+                style: css.input,
+                value: verifyCode,
+                placeholder: t('verifyCodePrompt'),
+                onInput: (e: { target: { value: string } }) => setVerifyCode(e.target.value),
+              }),
+              h('button', {
+                style: css.button,
+                disabled: busy || !verifyCode.trim(),
+                onClick: () => {
+                  void action('/api/dsh-wechat-bridge/pair/verify-code', { code: verifyCode.trim() })
+                  setVerifyCode('')
+                },
+              }, t('verifyCodeSubmit')),
+            )
+          : null,
       ),
       h('div', null,
         h('span', { style: css.label }, t('accountId')),
@@ -313,6 +394,16 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
       status?.lastSendError
         ? h('p', { style: css.muted }, `⚠ ${t('requestFailed')}: errcode=${status.lastSendError.errcode ?? '-'} ${status.lastSendError.errmsg ?? ''}`)
         : null,
+      // P2-3: named-reason health line + actionable fix hints (read-only
+      // self-check — the status poll itself is the probe, nothing is sent).
+      status?.health && status.health.reason !== 'healthy'
+        ? h('div', null,
+            h('span', { style: css.label }, `🩺 ${status.health.reason}`),
+            (status.health.issues ?? []).map((issue, idx) =>
+              h('p', { key: idx, style: css.muted }, `↳ ${issue.fix}`),
+            ),
+          )
+        : null,
     ),
     // Held bot-identity switch: the gateway refuses to overwrite credentials
     // until a human confirms here (empty trust set auto-confirms host-side).
@@ -339,6 +430,22 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
           ),
         )
       : null,
+    h('div', { style: css.card },
+      h('div', { style: css.row },
+        h('h4', { style: css.title }, t('sessions')),
+      ),
+      h('p', { style: css.muted }, t('sessionsHint')),
+      (status?.sessions ?? []).length > 0
+        ? status!.sessions!.map((session) => h('div', { key: session.id, style: { ...css.row, alignItems: 'flex-start', padding: '8px 0', borderTop: '1px solid var(--dsw-alias-border-l2)' } },
+            h('div', { style: { minWidth: 0, flex: 1 } },
+              h('strong', { style: { display: 'block', fontSize: 13 } }, session.label),
+              h('p', { style: css.muted }, `${t('sessionId')}: ${session.id}`),
+              h('p', { style: css.muted }, `${t('sessionStatus')}: ${session.status} · ${t('sessionActivity')}: ${formatSessionActivity(session.lastActivityAt)}`),
+            ),
+            h('button', { style: css.button, disabled: busy, onClick: () => void action('/api/dsh-wechat-bridge/session-access', { sessionId: session.id, enabled: !session.enabled }) }, session.enabled ? t('stopWechat') : t('allowWechat')),
+          ))
+        : h('p', { style: css.muted }, t('noSessions')),
+    ),
     h('div', { style: css.card },
       h('div', { style: css.row },
         h('h4', { style: css.title }, t('pair')),

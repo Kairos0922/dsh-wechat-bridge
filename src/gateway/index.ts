@@ -15,6 +15,8 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import fs from 'node:fs'
 import path from 'node:path'
+import dns from 'node:dns/promises'
+import net from 'node:net'
 import QRCode from 'qrcode'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
@@ -25,6 +27,8 @@ import {
   getUploadUrl,
   notifyStart,
   notifyStop,
+  classifyFetchError,
+  setBotAgent,
   pollQrStatus,
   sendMessage,
   sendTyping,
@@ -52,7 +56,7 @@ import {
   type SendResult,
   type WechatCredentials,
 } from './types.ts'
-import { downloadImage as downloadImageMedia } from './media.ts'
+import { downloadImage as downloadImageMedia, downloadMediaObject as downloadMediaObjectMedia, type CdnMediaRef } from './media.ts'
 import {
   aesEcbPaddedSize,
   buildOutboundMediaItem,
@@ -63,6 +67,8 @@ import {
 } from './upload.ts'
 import { debugLogEvent, debugLogMediaCapture } from '../debug-log.ts'
 import { PollCursorStore, SeenStore } from '../seen.ts'
+
+const POLL_RECONNECT_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000] as const
 
 export interface GatewayConfig {
   baseUrl?: string
@@ -79,6 +85,8 @@ export interface GatewayConfig {
    * accepted for CDN media download/upload URLs.
    */
   trustedMediaHosts?: string[]
+  /** P2-2: configured bot_agent for base_info (sanitized; observability only). */
+  botAgent?: string
 }
 
 export const Config = z.object({
@@ -88,9 +96,26 @@ export const Config = z.object({
   accountId: z.string().default(''),
   trustedBaseHosts: z.array(z.string()).default([]),
   trustedMediaHosts: z.array(z.string()).default([]),
+  botAgent: z.string(),
 })
 
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped'
+
+/** P2-3: named-reason health snapshot (read-only; no probes, no sends). */
+export interface HealthSnapshotIssue {
+  reason: string
+  fix: string
+}
+
+export interface HealthSnapshot {
+  status: GatewayStatus
+  reason: 'healthy' | 'starting' | 'pairing' | 'unauthenticated' | 'paused' | 'reconnecting' | 'stopped' | 'no-inbound-since-boot'
+  issues: HealthSnapshotIssue[]
+  pollFailures: number
+  lastInboundAt: number | null
+  lastOutboundAt: number | null
+  uptimeMs: number
+}
 
 export interface LoginQrOptions {
   /**
@@ -100,6 +125,8 @@ export interface LoginQrOptions {
    */
   onQr?: (qr: { scanData: string; pollToken: string }) => void
   onStatus?: (status: QrLoginStatus | string) => void
+  /** P0-1: verify-code source for the CLI flow (stdin prompt in login.mjs). */
+  onVerifyCodeNeeded?: () => Promise<string | null>
   botType?: string
   /** Overall login timeout (ms). Default 5 minutes. */
   timeoutMs?: number
@@ -152,6 +179,72 @@ export function redactItemForCapture(item: MessageItem): MessageItem {
   return clone
 }
 
+/**
+ * P1-5: fetch a remote http(s) media object for outbound forwarding.
+ * Guards: private/loopback/link-local hosts are refused (the URL comes from
+ * model output and must not become an internal-network probe), the body is
+ * streamed with the same byte cap as uploads, and the whole exchange runs
+ * under a 30s timeout.
+ */
+function isPrivateAddress(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '')
+  if (net.isIPv4(normalized)) {
+    const octets = normalized.split('.').map(Number)
+    const first = octets[0] ?? -1
+    const second = octets[1] ?? -1
+    return first === 0 || first === 10 || first === 100 && second >= 64 && second <= 127 || first === 127 ||
+      first === 169 && second === 254 || first === 172 && second >= 16 && second <= 31 ||
+      first === 192 && second === 0 || first === 192 && second === 168 || first === 198 && second >= 18 && second <= 19 ||
+      first >= 224
+  }
+  if (!net.isIPv6(normalized)) return false
+  const compact = normalized.replace(/^::ffff:/, '')
+  if (compact !== normalized && net.isIPv4(compact)) return isPrivateAddress(compact)
+  return normalized === '::' || normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd') ||
+    normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')
+}
+
+async function assertPublicMediaUrl(url: URL): Promise<void> {
+  const host = url.hostname.toLowerCase()
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) {
+    throw new Error(`refusing to fetch media from private/loopback host: ${host}`)
+  }
+  const addresses = net.isIP(host) ? [host] : await dns.lookup(host, { all: true }).then((results) => results.map((r) => r.address))
+  if (addresses.length === 0 || addresses.some(isPrivateAddress)) {
+    throw new Error(`refusing to fetch media from private/loopback host: ${host}`)
+  }
+}
+
+export async function fetchRemoteMedia(rawUrl: string): Promise<Buffer> {
+  let url: URL
+  try { url = new URL(rawUrl) } catch { throw new Error(`invalid media URL: ${rawUrl.slice(0, 120)}`) }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`unsupported media URL scheme: ${url.protocol}`)
+  for (let hop = 0; hop <= 3; hop += 1) {
+    await assertPublicMediaUrl(url)
+    const res = await fetch(url.toString(), { redirect: 'manual', signal: AbortSignal.timeout(30_000) })
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location')
+      if (!location || hop === 3) throw new Error('remote media redirect rejected')
+      url = new URL(location, url)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('remote media redirect scheme rejected')
+      continue
+    }
+    if (!res.ok) throw new Error(`remote media download failed: ${res.status} ${res.statusText}`)
+    const contentLength = Number(res.headers.get('content-length') ?? '') || 0
+    if (contentLength > UPLOAD_MAX_BYTES) throw new Error(`remote media too large: ${contentLength} bytes > ${UPLOAD_MAX_BYTES}`)
+    const chunks: Buffer[] = []
+    let total = 0
+    if (res.body) for await (const chunk of res.body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += buf.length
+      if (total > UPLOAD_MAX_BYTES) throw new Error(`remote media too large: ${total} bytes > ${UPLOAD_MAX_BYTES}`)
+      chunks.push(buf)
+    }
+    return Buffer.concat(chunks)
+  }
+  throw new Error('remote media redirect rejected')
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** The iLink gateway service provided by the wechat-gateway plugin. */
@@ -196,13 +289,27 @@ export class WechatGateway extends Service {
   // ---- C3/H4: pending pairing (new account scanned while another is paired) ----
   /** Full stashed credentials of the pending pairing (kept private). */
   private pendingCreds: WechatCredentials | null = null
+  /** P2-6: when the held identity switch was stashed (TTL-checked on use). */
+  private pendingCredsAt = 0
+
+  private static readonly PENDING_CREDS_TTL_MS = 10 * 60_000
+
+  private get pendingCredsFresh(): boolean {
+    if (this.pendingCreds === null) return false
+    if (Date.now() - this.pendingCredsAt <= WechatGateway.PENDING_CREDS_TTL_MS) return true
+    this.pendingCreds = null
+    this.pendingCredsAt = 0
+    this.pairingMessage = ''
+    debugLogEvent({ event: 'pairing-pending-expired' })
+    return false
+  }
 
   /**
    * C3: a pairing awaiting panel confirmation. Only the pairer's ids are
    * exposed — the full credentials stay private until confirmPairing().
    */
   get pendingPair(): { userId: string | null; accountId: string | null } | null {
-    if (!this.pendingCreds) return null
+    if (!this.pendingCreds || !this.pendingCredsFresh) return null
     return { userId: this.pendingCreds.ilinkUserId ?? null, accountId: this.pendingCreds.accountId ?? null }
   }
 
@@ -221,10 +328,20 @@ export class WechatGateway extends Service {
   private ticketRetryAt = 0
   private ticketBackoffMs = 2_000
 
+  // ---- P2-3: health snapshot inputs (single-account equivalent of the
+  // official ChannelAccountSnapshot + named-reason health policy) ----
+  private bootedAt = Date.now()
+  /** Consecutive poll failures right now (0 = healthy flow). */
+  private pollFailures = 0
+  lastInboundAt: number | null = null
+  lastOutboundAt: number | null = null
+
   constructor(ctx: Context, config: GatewayConfig) {
     super(ctx, 'wechat')
     this.ctx = ctx
     this.c = config as ResolvedGatewayConfig
+    // P2-2: install the configured bot_agent before any API call.
+    setBotAgent(this.c.botAgent)
     ctx.effect(() => {
       this.ctx.logger.info(
         '[dsh-wechat-bridge] wechat-gateway mounted (status=%s, baseUrl=%s)',
@@ -286,10 +403,28 @@ export class WechatGateway extends Service {
     // Announce this poller to the gateway — without it the server may accept
     // sends but never deliver them after an abrupt restart.
     try {
-      await notifyStart({ baseUrl: creds.baseUrl || this.c.baseUrl, token: creds.botToken })
+      const announced = await notifyStart({ baseUrl: creds.baseUrl || this.c.baseUrl, token: creds.botToken })
+      // P0-3: a rejected announce (ret!==0) must not leave the gateway
+      // claiming a healthy 'polling' state — surface it as 'paused' with a
+      // pairing hint, mirroring the official ret!==0 warning.
+      if (announced.ret !== undefined && announced.ret !== 0) {
+        debugLogEvent({ event: 'notify-start', ok: false, ret: announced.ret, errmsg: announced.errmsg })
+        this.ctx.logger.warn(
+          '[dsh-wechat-bridge] notifyStart 被拒绝 (ret=%s errmsg=%s) — 置为 paused，请重新扫码配对',
+          announced.ret,
+          announced.errmsg ?? '',
+        )
+        this.status = 'paused'
+        this.pairingMessage = '上线通告被服务器拒绝，请重新扫码配对'
+        return
+      }
       debugLogEvent({ event: 'notify-start', ok: true })
     } catch (err) {
       debugLogEvent({ event: 'notify-start', ok: false, error: String(err).slice(0, 200) })
+      this.status = 'paused'
+      this.pairingMessage = '上线通告失败，请检查网络后重新配对'
+      this.ctx.logger.warn('[dsh-wechat-bridge] notifyStart 失败，暂停轮询: %s', String(err).slice(0, 200))
+      return
     }
     this.status = 'polling'
     void this.startPollLoop(creds)
@@ -314,6 +449,13 @@ export class WechatGateway extends Service {
     qrPollIntervalMs?: number
     onQr?: (qr: { scanData: string; pollToken: string }) => void
     onStatus?: (status: QrLoginStatus | string) => void
+    /**
+     * P0-1: called when the server answers `need_verifycode` (numeric code
+     * shown in the scanning WeChat client). Resolves with the code, or null
+     * to keep waiting (the poll loop re-arms on the next need_verifycode).
+     * Port of the official login-qr.ts:321-330 pendingVerifyCode flow.
+     */
+    onVerifyCodeNeeded?: () => Promise<string | null>
     onConfirmed: (creds: WechatCredentials) => Promise<void>
     /**
      * Panel flow only: after a confirmed pairing, start/restart the poll loop
@@ -334,12 +476,22 @@ export class WechatGateway extends Service {
     }
 
     try {
-      let qr = await fetchQrCode({ botType: opts.botType })
+      // P0-2: report already-bound bot tokens so the server can answer
+      // binded_redirect for an existing binding instead of issuing a
+      // duplicate session (official getLocalBotTokenList, max 10).
+      const existingToken = (await this.resolveCredentials())?.botToken
+      let qr = await fetchQrCode({ botType: opts.botType, localTokenList: existingToken ? [existingToken] : [] })
       emitQr(qr)
 
       let baseUrl = LOGIN_BASE_URL
+      // P0-1: shared refresh budget for expired / verify_code_blocked — the
+      // official MAX_QR_REFRESH_COUNT=3 caps both (login-qr.ts:331-388) so a
+      // risk-controlled login cannot spin until the overall timeout.
+      const MAX_QR_REFRESH_COUNT = 3
+      let qrRefreshCount = 0
+      let pendingVerifyCode: string | null = null
       while (Date.now() - startedAt < timeoutMs) {
-        const st = await pollQrStatus({ baseUrl, qrcode: qr.qrcode })
+        const st = await pollQrStatus({ baseUrl, qrcode: qr.qrcode, verifyCode: pendingVerifyCode ?? undefined })
         switch (st.status) {
           case 'confirmed': {
             const creds: WechatCredentials = {
@@ -374,6 +526,7 @@ export class WechatGateway extends Service {
             // credentials — stash them pending panel confirmation; the
             // existing poll loop keeps running with the old account.
             this.pendingCreds = creds
+            this.pendingCredsAt = Date.now()
             this.pairingMessage = '检测到新账号扫码，等待面板确认'
             this.status = 'polling'
             this.ctx.emit('wechat/pair-pending', {
@@ -391,17 +544,46 @@ export class WechatGateway extends Service {
             // Already bound: existing local credentials remain valid.
             this.status = 'polling'
             return { success: true, credentials: undefined, message: '已绑定，沿用现有凭据' }
-          case 'expired':
+          case 'expired': {
             opts.onStatus?.('expired')
-            qr = await fetchQrCode({ baseUrl, botType: opts.botType })
+            qrRefreshCount += 1
+            if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
+              // Official login-qr.ts:331-336: give up after the cap instead of
+              // spinning fresh QRs until the overall timeout.
+              const creds0 = await this.resolveCredentials()
+              this.status = creds0?.botToken ? 'polling' : 'unauthenticated'
+              return { success: false, message: `二维码已过期 ${qrRefreshCount - 1} 次，请重新发起配对` }
+            }
+            pendingVerifyCode = null
+            qr = await fetchQrCode({ baseUrl, botType: opts.botType, localTokenList: existingToken ? [existingToken] : [] })
             emitQr(qr)
             break
-          case 'need_verifycode':
+          }
+          case 'need_verifycode': {
             opts.onStatus?.('need_verifycode')
+            if (!opts.onVerifyCodeNeeded) break
+            const code = await opts.onVerifyCodeNeeded()
+            if (code && code.trim()) {
+              // Carry the code into the very next poll (official resumes
+              // polling with verify_code immediately, login-qr.ts:321-330).
+              pendingVerifyCode = code.trim()
+            }
             break
-          case 'verify_code_blocked':
+          }
+          case 'verify_code_blocked': {
             opts.onStatus?.('verify_code_blocked')
+            qrRefreshCount += 1
+            if (qrRefreshCount > MAX_QR_REFRESH_COUNT) {
+              const creds0 = await this.resolveCredentials()
+              this.status = creds0?.botToken ? 'polling' : 'unauthenticated'
+              return { success: false, message: '验证码尝试过多被临时限制，请稍后再试' }
+            }
+            // Official: drop the stale code and reissue a fresh QR.
+            pendingVerifyCode = null
+            qr = await fetchQrCode({ baseUrl, botType: opts.botType, localTokenList: existingToken ? [existingToken] : [] })
+            emitQr(qr)
             break
+          }
           default:
             opts.onStatus?.(st.status)
         }
@@ -440,6 +622,7 @@ export class WechatGateway extends Service {
       qrPollIntervalMs: opts.qrPollIntervalMs,
       onQr: opts.onQr,
       onStatus: opts.onStatus,
+      onVerifyCodeNeeded: opts.onVerifyCodeNeeded,
       onConfirmed: async () => {},
     })
     return result
@@ -448,6 +631,48 @@ export class WechatGateway extends Service {
   /** Pairing state surfaced to the Web settings panel. */
   pairingQr: { scanData: string; svg: string } | null = null
   pairingMessage: string = ''
+  /** P0-1: true while the pairing loop is waiting for a numeric verify code. */
+  needVerifyCode: boolean = false
+  private verifyCodeResolver: ((code: string | null) => void) | null = null
+
+  /**
+   * Panel-side verify-code source: parks the pairing loop on a deferred that
+   * `submitVerifyCode` resolves. Times out to null after 2 minutes so the
+   * loop re-arms on the next need_verifycode until the overall timeout.
+   */
+  private awaitPanelVerifyCode(): Promise<string | null> {
+    if (this.verifyCodeResolver) this.verifyCodeResolver(null)
+    return new Promise((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true
+          this.verifyCodeResolver = null
+          this.needVerifyCode = false
+          resolve(null)
+        }
+      }, 2 * 60_000)
+      timer.unref?.()
+      this.verifyCodeResolver = (code) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.verifyCodeResolver = null
+        this.needVerifyCode = false
+        resolve(code)
+      }
+      this.needVerifyCode = true
+      this.pairingMessage = '需要验证码：请在微信查看数字验证码并填入输入框'
+    })
+  }
+
+  /** P0-1: submit a numeric verify code from the panel (or tests). */
+  submitVerifyCode(code: string): boolean {
+    const trimmed = code.trim()
+    if (!this.verifyCodeResolver) return false
+    this.verifyCodeResolver(trimmed || null)
+    return true
+  }
 
   /**
    * Start a pairing from the Web settings panel: renders the QR as SVG,
@@ -471,6 +696,7 @@ export class WechatGateway extends Service {
       onStatus: (status) => {
         this.pairingMessage = String(status)
       },
+      onVerifyCodeNeeded: () => this.awaitPanelVerifyCode(),
       onConfirmed: async (creds) => {
         // Persisting here; the poll-loop start/restart is handled by the
         // confirmed branch through the unified entry (M2).
@@ -494,7 +720,7 @@ export class WechatGateway extends Service {
    * the new account through the unified entry.
    */
   async confirmPairing(): Promise<boolean> {
-    if (!this.pendingCreds) return false
+    if (!this.pendingCreds || !this.pendingCredsFresh) return false
     const creds = this.pendingCreds
     this.pendingCreds = null
     await this.saveCredentials(creds)
@@ -527,6 +753,9 @@ export class WechatGateway extends Service {
    * Returns the new loop's lifetime promise (callers normally `void` it).
    */
   private startPollLoop(creds: WechatCredentials): Promise<void> {
+    // P2-9: a new polling generation may use a new bot identity; never reuse
+    // typing tickets issued under the previous credential set.
+    this.typingTickets.clear()
     this.pollGeneration += 1
     const gen = this.pollGeneration
     const prev = this.pollLoopPromise
@@ -585,6 +814,7 @@ export class WechatGateway extends Service {
       let failures = 0
       while (!this.stopPolling) {
         if (gen !== this.pollGeneration) break // superseded by a newer loop
+        this.pollFailures = failures
         if (failures >= 3) {
           this.status = 'paused'
           this.ctx.logger.warn('[dsh-wechat-bridge] 3 次连续失败，暂停 30s 后重试')
@@ -660,6 +890,7 @@ export class WechatGateway extends Service {
           }
           this.handleBatch(batch.msgs ?? [])
           this.status = 'polling'
+          this.pollFailures = 0
         } catch (err) {
           if (gen !== this.pollGeneration) break
           // HTTP 403 = the iLink exclusive lock: another poller owns this
@@ -673,9 +904,11 @@ export class WechatGateway extends Service {
             break
           }
           failures += 1
-          debugLogEvent({ event: 'poll-error', failures, error: String(err).slice(0, 200) })
-          this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s', failures, String(err))
-          await new Promise((r) => setTimeout(r, 2_000))
+          const classified = classifyFetchError(err)
+          debugLogEvent({ event: 'poll-error', failures, error: String(err).slice(0, 200), type: classified.type, code: classified.code, description: classified.description })
+          this.ctx.logger.warn('[dsh-wechat-bridge] poll 失败(%d/3): %s [type=%s code=%s]', failures, String(err).slice(0, 120), classified.type, classified.code ?? '-')
+          const reconnectDelay = POLL_RECONNECT_BACKOFF_MS[Math.min(failures - 1, POLL_RECONNECT_BACKOFF_MS.length - 1)] ?? 30_000
+          await new Promise((r) => setTimeout(r, reconnectDelay))
         } finally {
           this.pollAbort = null
         }
@@ -712,6 +945,7 @@ export class WechatGateway extends Service {
       }
       const senderId = msg.from_user_id ?? ''
       if (!senderId) continue
+      this.lastInboundAt = Date.now()
       const payload: InboundEvent = {
         message: msg,
         senderId,
@@ -755,9 +989,67 @@ export class WechatGateway extends Service {
 
   // ---------------------------------------------------------------- outbound
 
+  /**
+   * P2-3: bridge-level health snapshot — the single-account equivalent of the
+   * official ChannelAccountSnapshot + named-reason health policy
+   * (channel-health-policy.ts / channels-status-issues.ts): health is a
+   * named reason, never a bare boolean, and every issue carries a fix hint.
+   * Purely read-only — no probes, no sends.
+   */
+  healthSnapshot(): HealthSnapshot {
+    const now = Date.now()
+    const uptimeMs = now - this.bootedAt
+    // Named reason: startup grace (60s) so a fresh boot does not read as
+    // stale; then consecutive-failure and cursor-staleness reasons.
+    let reason: HealthSnapshot['reason'] = 'healthy'
+    let fix: string | null = null
+    if (this.status === 'unauthenticated') {
+      reason = 'unauthenticated'
+      fix = '在设置面板扫码配对'
+    } else if (this.status === 'pairing') {
+      reason = 'pairing'
+    } else if (uptimeMs < 60_000) {
+      reason = 'starting'
+    } else if (this.status === 'paused') {
+      reason = 'paused'
+      fix = this.pairingMessage || '等待自动恢复，或重新扫码配对'
+    } else if (this.pollFailures > 0) {
+      reason = 'reconnecting'
+      fix = `轮询重试中（${this.pollFailures}/3）——检查本机网络与 DNS；持续失败会自动退避`
+    } else if (this.status !== 'polling') {
+      reason = 'stopped'
+      fix = '重启 dsh web 或检查插件挂载日志'
+    }
+    const issues: HealthSnapshotIssue[] = []
+    if (fix) issues.push({ reason, fix })
+    // Inbound death outranks everything cosmetic: a poll loop that is
+    // "up" but not advancing the cursor silently loses messages.
+    if (this.status === 'polling' && reason === 'healthy' && this.lastInboundAt === null && uptimeMs > 30 * 60_000) {
+      issues.push({
+        reason: 'no-inbound-since-boot',
+        fix: '启动以来没有收到任何消息——如确有人发过消息，检查 debug.log 的 poll 事件',
+      })
+    }
+    return {
+      status: this.status,
+      reason,
+      issues,
+      pollFailures: this.pollFailures,
+      lastInboundAt: this.lastInboundAt,
+      lastOutboundAt: this.lastOutboundAt,
+      uptimeMs,
+    }
+  }
+
   /** Download and decrypt an inbound image (M3: image-in-session). */
   async downloadImage(item: ImageItem): Promise<{ data: Buffer; ext: string }> {
     return downloadImageMedia({ item, cdnBaseUrl: this.c.cdnBaseUrl, extraTrustedHosts: this.c.trustedMediaHosts })
+  }  /**
+   * P1-1: download and decrypt an inbound file/video object (same hardened
+   * CDN pipeline as images; callers name the output file).
+   */
+  async downloadMediaObject(media: CdnMediaRef): Promise<Buffer> {
+    return downloadMediaObjectMedia({ media, cdnBaseUrl: this.c.cdnBaseUrl, extraTrustedHosts: this.c.trustedMediaHosts })
   }
 
   /** Send one structured message item (text or bot progress card). */
@@ -792,6 +1084,7 @@ export class WechatGateway extends Service {
       }
       // A success clears the sticky failure banner on the settings panel.
       this.lastSendError = null
+      this.lastOutboundAt = Date.now()
       debugLogEvent({
         event: 'send',
         to: params.toUserId,
@@ -808,15 +1101,23 @@ export class WechatGateway extends Service {
       // the rate-limit/session-class ret=-2 (protocol.md §5), which the
       // dispatch/outbox layers recover from (tokenless resend / backoff) via
       // `failureClass`. Anything else (fetch timeout/network/HTTP) is
-      // transport-level and retryable.
+      // transport-level.
       const serverRejected = err instanceof IlinkSendError
       const failureClass = serverRejected ? classifySendFailure(err.ret, err.errcode, err.errmsg) : undefined
+      // P2-1: network-level classification for the debug sink (dns/tcp/tls/…).
+      const netClass = serverRejected ? undefined : classifyFetchError(err)
+      // P0 (OpenClaw 2.0 alignment #104632): a send TIMEOUT is an UNCERTAIN
+      // outcome — the server may have processed the message, so blind retry
+      // risks the "likely duplicate" upstream explicitly avoids. Only a
+      // connection that never established (dns/tcp/tls) proves not-sent.
+      const uncertain = !serverRejected && netClass?.type === 'timeout'
       const record: SendResult = {
         ok: false,
         ret: serverRejected ? err.ret : undefined,
         errcode: serverRejected ? err.errcode : undefined,
         errmsg: err instanceof Error ? err.message : String(err),
-        retryable: !serverRejected,
+        retryable: !serverRejected && !uncertain,
+        uncertain,
         failureClass,
       }
       this.lastSendError = { errcode: record.errcode, errmsg: (record.errmsg ?? '').slice(0, 200), at: Date.now() }
@@ -824,6 +1125,8 @@ export class WechatGateway extends Service {
         event: 'send',
         to: params.toUserId,
         ...record,
+        netErrorType: netClass?.type ?? null,
+        netErrorCode: netClass?.code ?? null,
         failureClass: failureClass ?? null,
         itemType: params.item.type ?? null,
         len: params.item.text_item?.text?.length ?? null,
@@ -851,9 +1154,10 @@ export class WechatGateway extends Service {
   }
 
   /**
-   * Upload a local file to the WeChat CDN and send it as a message item.
-   * Full pipeline per the official upload flow: getUploadUrl → AES-128-ECB →
-   * CDN POST → sendMessage with the CDN reference. mediaType FILE or IMAGE.
+   * Upload a local file (or a remote http(s) URL, P1-5) to the WeChat CDN and
+   * send it as a message item. Full pipeline per the official upload flow:
+   * getUploadUrl → AES-128-ECB → CDN POST → sendMessage with the CDN
+   * reference. mediaType FILE or IMAGE.
    */
   private async uploadAndSendMedia(params: {
     toUserId: string
@@ -867,7 +1171,15 @@ export class WechatGateway extends Service {
     const creds = params.creds ?? (await this.resolveCredentials())
     if (!creds?.botToken) return { ok: false, errmsg: 'no credentials' }
     try {
-      const plaintext = fs.readFileSync(params.filePath)
+      // P1-5: remote http(s) URLs are fetched first (official
+      // downloadRemoteImageToTemp flow), then the rest of the pipeline is
+      // identical. Private/loopback hosts are refused: the URL comes from
+      // model output, and fetching it must not become an internal-network
+      // probe (DNS-rebinding-level defenses are out of scope and noted in
+      // docs/porting-notes.md).
+      const plaintext = /^https?:\/\//i.test(params.filePath)
+        ? await fetchRemoteMedia(params.filePath)
+        : fs.readFileSync(params.filePath)
       if (plaintext.length > UPLOAD_MAX_BYTES) {
         return { ok: false, errmsg: `file too large (${plaintext.length} bytes > ${UPLOAD_MAX_BYTES})`, retryable: false }
       }
@@ -978,6 +1290,27 @@ export class WechatGateway extends Service {
     if (cached !== undefined && Date.now() < cached.expiresAt) {
       return cached.value
     }
+    // P2-7: stale-while-revalidate — an EXPIRED ticket is still servable
+    // (the server tolerates it for a grace window); return it immediately
+    // and refresh in the background instead of stalling the typing indicator
+    // behind a getConfig round-trip. With no previous ticket at all, fall
+    // back to the synchronous fetch.
+    if (cached !== undefined && cached.value) {
+      if (Date.now() >= this.ticketRetryAt) {
+        void this.refreshTypingTicket(creds, ilinkUserId, contextToken)
+      }
+      return cached.value
+    }
+    if (Date.now() < this.ticketRetryAt) return null
+    return this.refreshTypingTicket(creds, ilinkUserId, contextToken)
+  }
+
+  /** Synchronous ticket refresh used by resolveTypingTicket (also fires async). */
+  private async refreshTypingTicket(
+    creds: WechatCredentials,
+    ilinkUserId: string,
+    contextToken?: string,
+  ): Promise<string | null> {
     if (Date.now() < this.ticketRetryAt) return null
     try {
       const cfg = await getConfig({

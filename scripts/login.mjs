@@ -16,6 +16,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import readline from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 
 import { Context } from '@deepseek-ai/cordis'
@@ -64,9 +65,20 @@ const result = await ctx.wechat.loginQr({
   onStatus: (status) => {
     if (status === 'scaned') console.log('已扫码，请在微信里确认…')
     if (status === 'expired') console.log('二维码已过期，正在刷新…')
-    if (status === 'need_verifycode') console.log('需要验证码，请在微信中完成验证后重试登录。')
-    if (status === 'verify_code_blocked') console.log('验证码尝试过多被临时限制，请稍后再试。')
+    if (status === 'need_verifycode') console.log('需要验证码…')
+    if (status === 'verify_code_blocked') console.log('验证码尝试过多被临时限制，正在刷新二维码…')
     if (status === 'binded_redirect') console.log('该微信已绑定过，沿用现有凭据。')
+  },
+  // P0-1: the server demands the numeric code shown in the scanning WeChat
+  // client — read it from stdin and carry it into the next status poll.
+  onVerifyCodeNeeded: async () => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    try {
+      const code = await rl.question('🔑 请输入微信中显示的数字验证码（直接回车跳过等待下次提示）: ')
+      return code.trim() || null
+    } finally {
+      rl.close()
+    }
   },
 })
 

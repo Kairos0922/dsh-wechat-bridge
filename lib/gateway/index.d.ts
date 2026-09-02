@@ -14,6 +14,7 @@ import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
 import { type QrLoginStatus } from './ilink-client.ts';
 import { type ImageItem, type InboundEvent, type MessageItem, type SendResult, type WechatCredentials } from './types.ts';
+import { type CdnMediaRef } from './media.ts';
 export interface GatewayConfig {
     baseUrl?: string;
     cdnBaseUrl?: string;
@@ -29,6 +30,8 @@ export interface GatewayConfig {
      * accepted for CDN media download/upload URLs.
      */
     trustedMediaHosts?: string[];
+    /** P2-2: configured bot_agent for base_info (sanitized; observability only). */
+    botAgent?: string;
 }
 export declare const Config: z<Schemastery.ObjectS<{
     baseUrl: z<string, string>;
@@ -37,6 +40,7 @@ export declare const Config: z<Schemastery.ObjectS<{
     accountId: z<string, string>;
     trustedBaseHosts: z<string[], string[]>;
     trustedMediaHosts: z<string[], string[]>;
+    botAgent: z<string, string>;
 }>, Schemastery.ObjectT<{
     baseUrl: z<string, string>;
     cdnBaseUrl: z<string, string>;
@@ -44,8 +48,23 @@ export declare const Config: z<Schemastery.ObjectS<{
     accountId: z<string, string>;
     trustedBaseHosts: z<string[], string[]>;
     trustedMediaHosts: z<string[], string[]>;
+    botAgent: z<string, string>;
 }>>;
 export type GatewayStatus = 'unauthenticated' | 'pairing' | 'polling' | 'paused' | 'stopped';
+/** P2-3: named-reason health snapshot (read-only; no probes, no sends). */
+export interface HealthSnapshotIssue {
+    reason: string;
+    fix: string;
+}
+export interface HealthSnapshot {
+    status: GatewayStatus;
+    reason: 'healthy' | 'starting' | 'pairing' | 'unauthenticated' | 'paused' | 'reconnecting' | 'stopped' | 'no-inbound-since-boot';
+    issues: HealthSnapshotIssue[];
+    pollFailures: number;
+    lastInboundAt: number | null;
+    lastOutboundAt: number | null;
+    uptimeMs: number;
+}
 export interface LoginQrOptions {
     /**
      * QR payload: `scanData` is the scannable content (a URL from the server's
@@ -57,6 +76,8 @@ export interface LoginQrOptions {
         pollToken: string;
     }) => void;
     onStatus?: (status: QrLoginStatus | string) => void;
+    /** P0-1: verify-code source for the CLI flow (stdin prompt in login.mjs). */
+    onVerifyCodeNeeded?: () => Promise<string | null>;
     botType?: string;
     /** Overall login timeout (ms). Default 5 minutes. */
     timeoutMs?: number;
@@ -82,6 +103,7 @@ export declare function redactContextToken(token: string | null | undefined): st
  * video items plus their media/thumb_media sub-objects — no full recursion.
  */
 export declare function redactItemForCapture(item: MessageItem): MessageItem;
+export declare function fetchRemoteMedia(rawUrl: string): Promise<Buffer>;
 declare module '@deepseek-ai/cordis' {
     interface Context {
         /** The iLink gateway service provided by the wechat-gateway plugin. */
@@ -118,6 +140,7 @@ export declare class WechatGateway extends Service {
         accountId: z<string, string>;
         trustedBaseHosts: z<string[], string[]>;
         trustedMediaHosts: z<string[], string[]>;
+        botAgent: z<string, string>;
     }>, Schemastery.ObjectT<{
         baseUrl: z<string, string>;
         cdnBaseUrl: z<string, string>;
@@ -125,6 +148,7 @@ export declare class WechatGateway extends Service {
         accountId: z<string, string>;
         trustedBaseHosts: z<string[], string[]>;
         trustedMediaHosts: z<string[], string[]>;
+        botAgent: z<string, string>;
     }>>;
     /** Pull the credentials service in from sibling loader entries. */
     static inject: string[];
@@ -145,6 +169,10 @@ export declare class WechatGateway extends Service {
     } | null;
     /** Full stashed credentials of the pending pairing (kept private). */
     private pendingCreds;
+    /** P2-6: when the held identity switch was stashed (TTL-checked on use). */
+    private pendingCredsAt;
+    private static readonly PENDING_CREDS_TTL_MS;
+    private get pendingCredsFresh();
     /**
      * C3: a pairing awaiting panel confirmation. Only the pairer's ids are
      * exposed — the full credentials stay private until confirmPairing().
@@ -161,6 +189,11 @@ export declare class WechatGateway extends Service {
     private typingTickets;
     private ticketRetryAt;
     private ticketBackoffMs;
+    private bootedAt;
+    /** Consecutive poll failures right now (0 = healthy flow). */
+    private pollFailures;
+    lastInboundAt: number | null;
+    lastOutboundAt: number | null;
     constructor(ctx: Context, config: GatewayConfig);
     /** Resolve credentials: explicit config first, then the credentials service. */
     resolveCredentials(): Promise<WechatCredentials | null>;
@@ -180,6 +213,17 @@ export declare class WechatGateway extends Service {
         svg: string;
     } | null;
     pairingMessage: string;
+    /** P0-1: true while the pairing loop is waiting for a numeric verify code. */
+    needVerifyCode: boolean;
+    private verifyCodeResolver;
+    /**
+     * Panel-side verify-code source: parks the pairing loop on a deferred that
+     * `submitVerifyCode` resolves. Times out to null after 2 minutes so the
+     * loop re-arms on the next need_verifycode until the overall timeout.
+     */
+    private awaitPanelVerifyCode;
+    /** P0-1: submit a numeric verify code from the panel (or tests). */
+    submitVerifyCode(code: string): boolean;
     /**
      * Start a pairing from the Web settings panel: renders the QR as SVG,
      * auto-refreshes on expiry, and persists credentials on confirm.
@@ -214,11 +258,23 @@ export declare class WechatGateway extends Service {
     private pollSleep;
     private runPollLoop;
     private handleBatch;
+    /**
+     * P2-3: bridge-level health snapshot — the single-account equivalent of the
+     * official ChannelAccountSnapshot + named-reason health policy
+     * (channel-health-policy.ts / channels-status-issues.ts): health is a
+     * named reason, never a bare boolean, and every issue carries a fix hint.
+     * Purely read-only — no probes, no sends.
+     */
+    healthSnapshot(): HealthSnapshot;
     /** Download and decrypt an inbound image (M3: image-in-session). */
     downloadImage(item: ImageItem): Promise<{
         data: Buffer;
         ext: string;
-    }>;
+    }>; /**
+     * P1-1: download and decrypt an inbound file/video object (same hardened
+     * CDN pipeline as images; callers name the output file).
+     */
+    downloadMediaObject(media: CdnMediaRef): Promise<Buffer>;
     /** Send one structured message item (text or bot progress card). */
     sendItem(params: {
         toUserId: string;
@@ -236,9 +292,10 @@ export declare class WechatGateway extends Service {
         creds?: WechatCredentials;
     }): Promise<SendResult>;
     /**
-     * Upload a local file to the WeChat CDN and send it as a message item.
-     * Full pipeline per the official upload flow: getUploadUrl → AES-128-ECB →
-     * CDN POST → sendMessage with the CDN reference. mediaType FILE or IMAGE.
+     * Upload a local file (or a remote http(s) URL, P1-5) to the WeChat CDN and
+     * send it as a message item. Full pipeline per the official upload flow:
+     * getUploadUrl → AES-128-ECB → CDN POST → sendMessage with the CDN
+     * reference. mediaType FILE or IMAGE.
      */
     private uploadAndSendMedia;
     /** Send a local file as a WeChat file attachment. */
@@ -272,6 +329,8 @@ export declare class WechatGateway extends Service {
      * official per-account cache.
      */
     private resolveTypingTicket;
+    /** Synchronous ticket refresh used by resolveTypingTicket (also fires async). */
+    private refreshTypingTicket;
     /** Send a typing indicator (1 = typing, 2 = cancel). */
     sendTypingIndicator(params: {
         toUserId: string;

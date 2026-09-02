@@ -21,6 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import { ILINK_BASE_URL, WEIXIN_CDN_BASE_URL } from './gateway/types.ts'
 import { WechatGateway } from './gateway/index.ts'
 import { wechatBridgeNode } from './node/index.ts'
+import { assertCleanBaseUrl, assertNoUnknownKeys, schemaKeys } from './config-guard.ts'
 import type { MarkdownMode } from './node/markdown.ts'
 
 export { WechatGateway } from './gateway/index.ts'
@@ -78,6 +79,8 @@ export interface Config {
   notifyMinTurnSec?: number
   /** Delete media/export files older than this many days. */
   mediaRetentionDays?: number
+  /** Coalesce rapid plain-text inbound messages (0 disables). */
+  inboundDebounceMs?: number
   /** Group chats the bridge may serve: room id → allowed senders. */
   allowGroups?: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long' (default off, skeleton). */
@@ -115,6 +118,8 @@ export interface Config {
   trustedMediaHosts?: string[]
   /** Non-loopback authorities the settings panel may be served under (LAN). */
   webTrustedHosts?: string[]
+  /** P2-2: bot_agent declared in base_info (sanitized; observability only). */
+  botAgent?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -137,6 +142,7 @@ export const Config: z<Config> = z.object({
   notifyOnComplete: z.boolean().default(false),
   notifyMinTurnSec: z.number().default(300),
   mediaRetentionDays: z.number().default(30),
+  inboundDebounceMs: z.number().min(0).default(2000),
   allowGroups: z.array(z.object({ roomId: z.string(), allowFrom: z.array(z.string()) })).default([]),
   cardMode: z.union(['off', 'long']).default('off'),
   /** Notify trusted users when a non-allowlisted sender attempts contact. */
@@ -154,6 +160,7 @@ export const Config: z<Config> = z.object({
   trustedBaseHosts: z.array(z.string()),
   trustedMediaHosts: z.array(z.string()),
   webTrustedHosts: z.array(z.string()),
+  botAgent: z.string(),
   token: z.string().default(''),
   accountId: z.string().default(''),
 })
@@ -163,6 +170,10 @@ export const Config: z<Config> = z.object({
  * present (resolved from the `credentials` service at startup).
  */
 export function apply(ctx: Context, config: Config): void {
+  // P2-5: unknown keys fail the mount loudly — schemastery keeps them
+  // silently, so a typo like `markdownmode` would otherwise just not apply.
+  assertNoUnknownKeys(config as unknown as Record<string, unknown>, schemaKeys(Config as unknown as { dict?: Record<string, unknown> }), 'config')
+  assertCleanBaseUrl(config.baseUrl, 'config.baseUrl')
   if (config.token) {
     // A token inline in the config file is readable by anyone with file
     // access and ends up in backups; the credentials service (macOS
@@ -180,6 +191,7 @@ export function apply(ctx: Context, config: Config): void {
     accountId: config.accountId,
     trustedBaseHosts: config.trustedBaseHosts,
     trustedMediaHosts: config.trustedMediaHosts,
+    botAgent: config.botAgent,
   })
   ctx.plugin(wechatBridgeNode, {
     allowFrom: config.allowFrom ?? [],
@@ -205,6 +217,7 @@ export function apply(ctx: Context, config: Config): void {
     notifyOnComplete: config.notifyOnComplete,
     notifyMinTurnSec: config.notifyMinTurnSec,
     mediaRetentionDays: config.mediaRetentionDays,
+    inboundDebounceMs: config.inboundDebounceMs,
     allowGroups: config.allowGroups,
     cardMode: config.cardMode,
     notifyRejected: config.notifyRejected,

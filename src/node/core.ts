@@ -29,6 +29,7 @@ import { resolveMode } from './presets.ts'
 import { debugLog, debugLogEvent } from '../debug-log.ts'
 import { BridgeState } from './state.ts'
 import { Outbox, OUTBOX_PRIORITY, type OutboxEntry, type OutboxEntryKind } from './outbox.ts'
+import { InboundDebouncer } from './debounce.ts'
 import type { MarkdownMode } from './markdown.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -85,6 +86,8 @@ export interface ResolvedNodeConfig {
   notifyMinTurnSec: number
   /** Delete media/export files older than this many days. */
   mediaRetentionDays: number
+  /** Coalesce rapid plain-text inbound messages (0 disables). */
+  inboundDebounceMs: number
   /** Group chats the bridge may serve: room id → allowed senders. */
   allowGroups: Array<{ roomId: string; allowFrom: string[] }>
   /** Long-image card mode: 'off' | 'long'. */
@@ -115,6 +118,12 @@ export const APPROVAL_COALESCE_PREFIX = 'approval:'
  * outage — a long outage must not dump a wall of stale messages.
  */
 export const CRITICAL_RESEND_CAP = 3
+
+/** Hard upper bound for best-effort outbound drain during synchronous dispose. */
+export const DRAIN_DEADLINE_MS = 4_000
+
+/** Allowlist entries left unused this long are likely inert configuration. */
+export const ALLOWLIST_ZERO_MATCH_MS = 24 * 60 * 60_000
 
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export function buildWelcomeMessage(opts: { allowFromEmpty: boolean; defaultModeName: string | null }): string {
@@ -155,6 +164,22 @@ export class WechatBridgeNode {
   readonly state: BridgeState
   readonly outbox: Outbox
 
+  /**
+   * P0 (OpenClaw 2.0 alignment): per-peer record of the latest UNCERTAIN
+   * outbound send (timed out without a confirmed server result). Never
+   * auto-resent (duplicate risk); consumed as a one-line system note on the
+   * peer's next inbound text message (takeUncertainNotice).
+   */
+  private readonly uncertainSends = new Map<string, { at: number; kind: string }>()
+  /**
+   * P1-6 (OpenClaw 2.0 alignment #131129): allowFrom entries that matched at
+   * least one inbound sender. Entries absent after ALLOWLIST_ZERO_MATCH_MS
+   * are probably inert (wxid normalization drift) and get a startup+runtime
+   * warning — an allowlist guard that silently never fires is a security bug.
+   */
+  private readonly allowFromHits = new Set<string>()
+  private readonly allowFromWarned = new Set<string>()
+
   /** peerId → active session (persisted through state). */
   private readonly peerSessions = new Map<string, SessionId>()
   /** sessionId → owning peer (so outbound events route back correctly). */
@@ -184,6 +209,13 @@ export class WechatBridgeNode {
   private readonly pendingAnswerRescued = new Set<string>()
   /** Per-sender serialization of inbound message handling (M9 race fix). */
   private readonly inboundChains = new Map<string, Promise<void>>()
+  /** Coalesces rapid plain-text inbound messages per conversation. */
+  private readonly debouncer: InboundDebouncer
+  /**
+   * When the current config was mounted, used to avoid warning immediately
+   * about allowFrom entries that have not had time to match.
+   */
+  private readonly allowFromStartedAt = Date.now()
   /**
    * Peers whose approval prompt failed to deliver (outbox drop). The prompt
    * is re-pushed on the peer's next inbound message — the user is at the
@@ -213,6 +245,14 @@ export class WechatBridgeNode {
       )
     }
     this.state = new BridgeState()
+    this.debouncer = new InboundDebouncer({
+      windowMs: config.inboundDebounceMs ?? 2000,
+      onFlush: (payload) => {
+        void this.enqueueInbound(payload.senderId, () => handleInbound(this, payload)).catch((err) => {
+          this.ctx.logger.warn('[dsh-wechat-bridge] debounced inbound handling failed: %s', String(err))
+        })
+      },
+    })
     this.outbox = new Outbox({
       minIntervalMs: config.minSendIntervalMs,
       backoffSecs: config.rateLimitBackoffSecs,
@@ -241,6 +281,11 @@ export class WechatBridgeNode {
         // pointless until the user's next inbound resets the window, and the
         // window budget must stay reserved for must-tier messages.
         if (reason === 'quota') return
+        // P0: timeout outcomes are uncertain, never replay automatically.
+        if (reason === 'uncertain') {
+          this.rememberUncertain(entry.to, entry.kind)
+          return
+        }
         // MUST-DELIVER messages (approval prompts, final answers, error/stop
         // notices) are NOT dropped for good: they are re-pushed the moment
         // the user's next inbound message proves the channel recovered
@@ -302,13 +347,19 @@ export class WechatBridgeNode {
     this.disposers.push(attachMediaRetention(this))
     this.disposers.push(
       this.ctx.on('wechat/message', (payload: InboundEvent) => {
-        // Serialized per sender: two rapid messages must not race session
-        // resolution (both seeing "no active agent" → two sessions created,
-        // or an orphan adopted twice). Chain failures must not break the
-        // chain; an unexpected error is logged, never an unhandled rejection.
-        void this.enqueueInbound(payload.senderId ?? 'unknown', () => handleInbound(this, payload)).catch((err) => {
-          this.ctx.logger.warn('[dsh-wechat-bridge] inbound handling failed: %s', String(err))
-        })
+        // P1-4 (OpenClaw 2.0 alignment): coalesce rapid TEXT-only messages
+        // from the same conversation into one agent turn before the
+        // per-sender chain. Media payloads flush any pending buffer first
+        // (ordering preserved), then dispatch themselves immediately.
+        for (const ready of this.debouncer.admit(payload)) {
+          // Serialized per sender: two rapid messages must not race session
+          // resolution (both seeing "no active agent" → two sessions created,
+          // or an orphan adopted twice). Chain failures must not break the
+          // chain; an unexpected error is logged, never an unhandled rejection.
+          void this.enqueueInbound(ready.senderId ?? 'unknown', () => handleInbound(this, ready)).catch((err) => {
+            this.ctx.logger.warn('[dsh-wechat-bridge] inbound handling failed: %s', String(err))
+          })
+        }
       }),
     )
     // Back-online notice: after consecutive poll failures the gateway emits
@@ -376,6 +427,33 @@ export class WechatBridgeNode {
     for (const menu of this.menus.values()) clearTimeout(menu.timer)
     this.menus.clear()
     for (const number of [...this.pending.keys()]) this.clearApproval(number)
+    // DSH disposers are synchronous. Flush already-seen debounce entries into
+    // the serialized inbound chain before closing the state store; otherwise
+    // an update can acknowledge a message and then discard it.
+    for (const ready of this.debouncer.flushAll()) {
+      void this.enqueueInbound(ready.senderId, () => handleInbound(this, ready)).catch((err) => {
+        this.ctx.logger.warn('[dsh-wechat-bridge] teardown inbound flush failed: %s', String(err))
+      })
+    }
+    void this.finishDispose()
+  }
+
+  private async finishDispose(): Promise<void> {
+    // Inbound work can enqueue replies after its promise resolves, so drain it
+    // first and only then wait for the outbox. A single deadline bounds both.
+    const started = Date.now()
+    const inbound = Promise.allSettled([...this.inboundChains.values()]).then(() => {})
+    await Promise.race([
+      inbound,
+      new Promise<void>((resolve) => setTimeout(resolve, DRAIN_DEADLINE_MS)),
+    ])
+    const remaining = Math.max(0, DRAIN_DEADLINE_MS - (Date.now() - started))
+    if (remaining > 0) {
+      await Promise.race([
+        this.outbox.drain().catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, remaining)),
+      ])
+    }
     this.outbox.dispose()
     this.state.dispose()
   }
@@ -622,6 +700,30 @@ export class WechatBridgeNode {
     return this.outbox.getPausedUntil()
   }
 
+  // ---------------------------------------------------------------- uncertain delivery / debounce
+
+  private rememberUncertain(peer: string | undefined, kind: string): void {
+    if (!peer) return
+    this.uncertainSends.set(peer, { at: Date.now(), kind })
+    debugLogEvent({ event: 'send-uncertain', peer, kind })
+  }
+
+  /** Consume the warning for the peer's next inbound text contact. */
+  takeUncertainNotice(peerKey: string): string | null {
+    const hit = this.uncertainSends.get(peerKey)
+    if (!hit) return null
+    this.uncertainSends.delete(peerKey)
+    if (Date.now() - hit.at > 24 * 60 * 60_000) return null
+    const what = hit.kind === 'image' ? '图片' : hit.kind === 'video' ? '视频' : hit.kind === 'file' ? '文件' : '消息'
+    return `[系统备注：上一条回复（${what}）发送超时，可能未送达。如对方表示没收到，可重新发送；不要盲目重发全部历史消息。]`
+  }
+
+  private disposeInboundDebounce(): void {
+    for (const dropped of this.debouncer.dispose()) {
+      debugLogEvent({ event: 'inbound-debounce-dropped', key: dropped.key, count: dropped.texts.length })
+    }
+  }
+
   // ---------------------------------------------------------------- routing
 
   /** The owning peer of a session, if known. */
@@ -688,10 +790,27 @@ export class WechatBridgeNode {
 
   /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ all pairing-confirmed scanners. */
   async isAllowed(senderId: string): Promise<boolean> {
-    if (this.resolved.allowFrom.includes(senderId)) return true
+    if (this.resolved.allowFrom.includes(senderId)) {
+      this.allowFromHits.add(senderId)
+      this.warnInertAllowFrom()
+      return true
+    }
+    this.warnInertAllowFrom()
     if (this.state.listPairedUserIds().includes(senderId)) return true
     const owner = await this.pairedUserId()
     return owner !== null && senderId === owner
+  }
+
+  private warnInertAllowFrom(): void {
+    const age = Date.now() - this.allowFromStartedAt
+    if (age < ALLOWLIST_ZERO_MATCH_MS) return
+    for (const entry of this.resolved.allowFrom) {
+      if (!this.allowFromHits.has(entry) && !this.allowFromWarned.has(entry)) {
+        this.allowFromWarned.add(entry)
+        this.ctx.logger.warn('[dsh-wechat-bridge] allowFrom entry has matched no sender for 24h; check wxid normalization: %s', entry)
+        debugLogEvent({ event: 'allowfrom-inert', entry })
+      }
+    }
   }
 
   /** All pairing-confirmed trusted WeChat ids (persisted). */
@@ -718,19 +837,43 @@ export class WechatBridgeNode {
    * A scanner whose pairing the gateway confirmed but whose trust admission
    * is held for operator confirmation in the settings panel (the trust set
    * was non-empty at scan time — pairing ≠ blind trust anymore).
+   * P2-6: held requests carry a TTL (10 min, cf. the official pairing-store
+   * 1h pending TTL) and every admission transition is audit-logged to
+   * events.jsonl (requested/approved/rejected/expired).
    */
   private pendingTrust: string | null = null
+  private pendingTrustAt = 0
+
+  /** Held trust requests expire — an operator cannot confirm a stale scan. */
+  private static readonly PENDING_TRUST_TTL_MS = 10 * 60_000
+
+  private pendingTrustExpired(): boolean {
+    return (
+      this.pendingTrust !== null &&
+      Date.now() - this.pendingTrustAt > WechatBridgeNode.PENDING_TRUST_TTL_MS
+    )
+  }
 
   get pendingTrustUserId(): string | null {
+    if (this.pendingTrust !== null && this.pendingTrustExpired()) {
+      debugLog({ event: 'pair-audit', action: 'expired', userId: this.pendingTrust })
+      this.pendingTrust = null
+    }
     return this.pendingTrust
   }
 
   /** Admit the held scanner into the persisted paired set. */
   async confirmPendingTrust(): Promise<boolean> {
     if (this.pendingTrust === null) return false
+    if (this.pendingTrustExpired()) {
+      debugLog({ event: 'pair-audit', action: 'expired', userId: this.pendingTrust })
+      this.pendingTrust = null
+      return false
+    }
     const userId = this.pendingTrust
     this.pendingTrust = null
     this.state.addPairedUserId(userId)
+    debugLog({ event: 'pair-audit', action: 'approved', userId })
     this.sendWelcome(userId)
     return true
   }
@@ -745,10 +888,13 @@ export class WechatBridgeNode {
     if (set.has(userId)) return
     if (set.size === 0) {
       this.state.addPairedUserId(userId)
+      debugLog({ event: 'pair-audit', action: 'bootstrap', userId })
       this.sendWelcome(userId)
       return
     }
     this.pendingTrust = userId
+    this.pendingTrustAt = Date.now()
+    debugLog({ event: 'pair-audit', action: 'requested', userId })
     this.ctx.logger.info('[dsh-wechat-bridge] scanner %s held for operator confirmation', userId)
   }
 
@@ -768,6 +914,7 @@ export class WechatBridgeNode {
   /** Discard the held scanner (never trusted, nothing persisted). */
   rejectPendingTrust(): boolean {
     if (this.pendingTrust === null) return false
+    debugLog({ event: 'pair-audit', action: 'rejected', userId: this.pendingTrust })
     this.pendingTrust = null
     return true
   }
@@ -780,6 +927,7 @@ export class WechatBridgeNode {
     if (this.pendingTrust === userId) this.pendingTrust = null
     this.peerSessions.delete(userId)
     this.peerContextTokens.delete(userId)
+    debugLog({ event: 'pair-audit', action: 'revoked', userId })
     this.enqueueText(userId, 'ℹ️ 你的配对已被操作者吊销，后续消息将不再被处理。', { kind: 'system' })
     return true
   }
@@ -791,17 +939,36 @@ export class WechatBridgeNode {
   private rejectedWindowStart = 0
   private rejectedWindowCount = 0
 
+  // P1-6: bridge-level pause switch — a first-class runtime state (not a
+  // process kill). Paused: inbound messages are logged but never routed to
+  // the model; the outbox, credentials and sessions are untouched. Exposed
+  // in the status snapshot and toggled from the settings panel.
+  private pausedState = false
+
+  setPaused(paused: boolean): void {
+    if (this.pausedState === paused) return
+    this.pausedState = paused
+    debugLog({ event: 'bridge-pause', paused })
+    this.ctx.logger.info('[dsh-wechat-bridge] bridge %s', paused ? 'PAUSED (inbound ignored)' : 'resumed')
+  }
+
+  isPaused(): boolean {
+    return this.pausedState
+  }
+
   /**
    * Notify all trusted peers that a stranger messaged the bot — rate-limited:
-   * at most once per 10 min per stranger, at most 3 per 10 min globally.
-   * Without this, a spamming stranger would starve the shared outbox budget
-   * (system notices outrank answers) — the transparency feature must not
-   * become a denial-of-service amplifier.
+   * at most once per HOUR per stranger (aligned with the official
+   * pairing-challenge resend throttle: a stranger's repeat messages must not
+   * re-notify the owner), at most 3 per 10 min globally. Without this, a
+   * spamming stranger would starve the shared outbox budget (system notices
+   * outrank answers) — the transparency feature must not become a
+   * denial-of-service amplifier.
    */
   notifyRejectedPeers(senderId: string): void {
     if (!this.resolved.notifyRejected) return
     const now = Date.now()
-    const WINDOW = 10 * 60_000
+    const WINDOW = 60 * 60_000
     if (now - (this.rejectedNoticeAt.get(senderId) ?? 0) < WINDOW) return
     if (now - this.rejectedWindowStart > WINDOW) {
       this.rejectedWindowStart = now
@@ -829,16 +996,27 @@ export class WechatBridgeNode {
       const previous = this.peerSessions.get(peerId)
       if (previous !== undefined) {
         this.peerSessions.delete(peerId)
-        this.sessionOwners.delete(previous)
+        // A shared session may still be active for another peer. Only remove
+        // the output-route owner when this peer is the current route owner;
+        // disabling one peer must never revoke another peer's access.
+        if (this.sessionOwners.get(previous) === peerId) {
+          this.sessionOwners.delete(previous)
+          this.state.setSessionOwner(previous, null)
+        }
       }
       this.state.setPeerSession(peerId, null)
-      this.state.setSessionOwner(previous ?? '', null)
       return
     }
     this.peerSessions.set(peerId, sessionId)
-    this.sessionOwners.set(sessionId, peerId)
+    // Binding a shared session must not steal its existing output route. The
+    // original owner remains the canonical WeChat recipient; only an unowned
+    // session gets its first route owner here.
+    const currentOwner = this.sessionOwners.get(sessionId)
+    if (currentOwner === undefined) {
+      this.sessionOwners.set(sessionId, peerId)
+      this.state.setSessionOwner(sessionId, peerId)
+    }
     this.state.setPeerSession(peerId, sessionId)
-    this.state.setSessionOwner(sessionId, peerId)
   }
 
   /** Cleanup hooks fired when a session is released (e.g. digest state). */
@@ -864,10 +1042,38 @@ export class WechatBridgeNode {
     this.setActiveSession(peerId, null)
   }
 
+  /** Enable or disable access to a session from trusted WeChat peers. */
+  enableSessionWechat(sessionId: string): void {
+    this.state.setSessionAccess(sessionId, true)
+  }
+
+  disableSessionWechat(sessionId: string): void {
+    this.state.setSessionAccess(sessionId, false)
+  }
+
+  isSessionWechatEnabled(sessionId: string): boolean {
+    return this.state.isSessionAccessEnabled(sessionId)
+  }
+
+  /** Sessions explicitly opened for WeChat access. */
+  listAccessibleSessions(): Session[] {
+    return listSessions(this).filter((session) => this.isSessionWechatEnabled(session.id)).slice(0, 50)
+  }
+
   /** Sessions this peer owns, most-recent-first. */
   sessionsForPeer(peerId: string): Session[] {
     return listSessions(this)
       .filter((session) => this.sessionOwners.get(session.id) === peerId)
+      .slice(0, 50)
+  }
+
+  /** Sessions visible to a trusted peer: owned or explicitly opened. */
+  sessionsAccessibleToPeer(peerId: string): Session[] {
+    // Keep this as the single ordering/filtering seam used by both `/sessions`
+    // and `/use N`; changing one without the other would make numbers point at
+    // the wrong session.
+    return listSessions(this)
+      .filter((session) => this.sessionOwners.get(session.id) === peerId || this.isSessionWechatEnabled(session.id))
       .slice(0, 50)
   }
 

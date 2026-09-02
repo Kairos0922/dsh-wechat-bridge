@@ -87,6 +87,8 @@ interface FakeNode {
   confirmPendingTrust(): Promise<boolean>
   rejectPendingTrust(): boolean
   revokePairedUser(userId: string): Promise<boolean>
+  isPaused(): boolean
+  setPaused(paused: boolean): void
 }
 
 function mount(opts: {
@@ -104,10 +106,13 @@ function mount(opts: {
     status: 'authenticated',
     pairingMessage: '',
     pendingPair: null,
+    needVerifyCode: false,
     resolveCredentials: async () => null,
     startPairing: async () => ({ svg: '<svg/>', scanData: 'x' }),
     confirmPairing: async () => false,
     rejectPairing: () => false,
+    submitVerifyCode: () => false,
+    healthSnapshot: () => ({ status: 'polling', reason: 'healthy', issues: [], pollFailures: 0, lastInboundAt: null, lastOutboundAt: null, uptimeMs: 0 }),
     ...opts.gateway,
   }
   const node: FakeNode = {
@@ -121,6 +126,8 @@ function mount(opts: {
     confirmPendingTrust: async () => false,
     rejectPendingTrust: () => false,
     revokePairedUser: async () => false,
+    isPaused: () => false,
+    setPaused: () => {},
     ...opts.node,
   }
   registerHostApi(ctx as never, gateway as never, node as never, { trustedHosts: TRUSTED })

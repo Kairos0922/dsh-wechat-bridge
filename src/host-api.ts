@@ -18,8 +18,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { WechatGateway } from './gateway/index.ts'
 import { listModes } from './node/presets.ts'
+import { listSessions } from './node/commands.ts'
 import type { WechatBridgeNode } from './node/core.ts'
 
 /** Minimal structural typing for the dsh-web `webServer` service seam. */
@@ -41,6 +43,10 @@ const PAIR_PATH = `${BASE_PATH}/pair`
 const PAIR_CONFIRM_PATH = `${BASE_PATH}/pair/confirm`
 const PAIR_REJECT_PATH = `${BASE_PATH}/pair/reject`
 const PAIR_REVOKE_PATH = `${BASE_PATH}/pair/revoke`
+const PAIR_VERIFY_CODE_PATH = `${BASE_PATH}/pair/verify-code`
+const PAUSE_PATH = `${BASE_PATH}/pause`
+const SESSIONS_PATH = `${BASE_PATH}/sessions`
+const SESSION_ACCESS_PATH = `${BASE_PATH}/session-access`
 
 /** localhost, IPv6 loopback, or any IPv4 address in 127/8. */
 function isLoopbackHostname(hostname: string): boolean {
@@ -148,6 +154,8 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
           ok: true,
           status: gateway.status,
           pairingMessage: gateway.pairingMessage,
+          needVerifyCode: gateway.needVerifyCode,
+          paused: node.isPaused(),
           paired: Boolean(creds?.botToken),
           accountId: creds?.accountId ?? null,
           allowFrom: node.resolved.allowFrom,
@@ -164,6 +172,7 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
             pausedUntil: pausedUntil === null || pausedUntil <= Date.now() ? null : pausedUntil,
           },
           lastSendError: gateway.lastSendError,
+          health: gateway.healthSnapshot(),
         })
       } catch (err) {
         ctx.logger.warn('[dsh-wechat-bridge] status endpoint failed: %s', String(err))
@@ -220,6 +229,94 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
         writeJson(res, 200, { ok: true, rejected })
       } catch (err) {
         ctx.logger.warn('[dsh-wechat-bridge] pair/reject failed: %s', String(err))
+        writeJson(res, 500, { ok: false, error: 'internal' })
+      }
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: PAIR_VERIFY_CODE_PATH,
+    handler: async (req, res) => {
+      if (!guard(req, res) || !postOnly(req, res)) return
+      try {
+        const body = (await readJsonBody(req)) as { code?: unknown } | null
+        const code = typeof body?.code === 'string' ? body.code : ''
+        if (!code.trim()) {
+          writeJson(res, 400, { ok: false, error: 'code required' })
+          return
+        }
+        writeJson(res, 200, { ok: true, submitted: gateway.submitVerifyCode(code) })
+      } catch (err) {
+        ctx.logger.warn('[dsh-wechat-bridge] pair/verify-code failed: %s', String(err))
+        writeJson(res, 500, { ok: false, error: 'internal' })
+      }
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: SESSIONS_PATH,
+    handler: async (req, res) => {
+      if (!guard(req, res)) return
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      try {
+        const sessions = listSessions(node).slice(0, 100).map((session) => ({
+          id: session.id,
+          enabled: node.isSessionWechatEnabled(session.id),
+          createdAt: session.header.createdAt,
+          eventCount: session.events.length,
+          owner: node.peerOf(session.id),
+        }))
+        writeJson(res, 200, { ok: true, sessions })
+      } catch (err) {
+        ctx.logger.warn('[dsh-wechat-bridge] sessions endpoint failed: %s', String(err))
+        writeJson(res, 500, { ok: false, error: 'internal' })
+      }
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: SESSION_ACCESS_PATH,
+    handler: async (req, res) => {
+      if (!guard(req, res) || !postOnly(req, res)) return
+      try {
+        const body = (await readJsonBody(req)) as { sessionId?: unknown; enabled?: unknown } | null
+        const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : ''
+        if (!sessionId || typeof body?.enabled !== 'boolean') {
+          writeJson(res, 400, { ok: false, error: 'sessionId and enabled required' })
+          return
+        }
+        const session = ctx.sessions.get(sessionId as never)
+        if (!session) {
+          writeJson(res, 404, { ok: false, error: 'session not found' })
+          return
+        }
+        if (body.enabled) node.enableSessionWechat(sessionId as never)
+        else node.disableSessionWechat(sessionId as never)
+        writeJson(res, 200, { ok: true, sessionId, enabled: node.isSessionWechatEnabled(sessionId) })
+      } catch (err) {
+        ctx.logger.warn('[dsh-wechat-bridge] session-access endpoint failed: %s', String(err))
+        writeJson(res, 500, { ok: false, error: 'internal' })
+      }
+    },
+  })
+
+  ctx.webServer.register({
+    kind: 'exact',
+    path: PAUSE_PATH,
+    handler: async (req, res) => {
+      if (!guard(req, res) || !postOnly(req, res)) return
+      try {
+        const body = (await readJsonBody(req)) as { paused?: unknown } | null
+        node.setPaused(Boolean(body?.paused))
+        writeJson(res, 200, { ok: true, paused: node.isPaused() })
+      } catch (err) {
+        ctx.logger.warn('[dsh-wechat-bridge] pause endpoint failed: %s', String(err))
         writeJson(res, 500, { ok: false, error: 'internal' })
       }
     },

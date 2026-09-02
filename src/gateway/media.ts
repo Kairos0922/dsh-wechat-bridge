@@ -92,12 +92,59 @@ async function fetchCdnWithRedirects(
 }
 
 /**
- * Download and decrypt one inbound image. Prefers the server-provided
- * `full_url`, then the client-built URL from `encrypt_query_param`.
+ * Fetch the (still-encrypted) CDN object behind a media reference. Prefers
+ * the server-provided `full_url`, then the client-built URL from
+ * `encrypt_query_param`.
  *
  * F4: the URL must pass assertCdnUrl, redirects are followed manually (each
  * hop re-validated, max 3), the body is streamed with a hard size cap and a
  * per-hop 30s timeout. `fetchFn` is injectable for tests.
+ */
+async function fetchCdnEncrypted(params: {
+  encParam: string
+  fullUrl?: string
+  cdnBaseUrl: string
+  extraTrustedHosts?: readonly string[]
+  fetchFn: typeof fetch
+}): Promise<Buffer> {
+  const { encParam, fullUrl, cdnBaseUrl } = params
+  if (!fullUrl && !encParam) {
+    throw new Error('media item has no url/encrypt_query_param')
+  }
+  const rawUrl = fullUrl || buildCdnDownloadUrl(encParam, cdnBaseUrl)
+  const cdnUrl = assertCdnUrl(rawUrl, params.extraTrustedHosts)
+  const res = await fetchCdnWithRedirects(cdnUrl, params.extraTrustedHosts, params.fetchFn)
+  if (!res.ok) {
+    throw new Error(`CDN download ${res.status} ${res.statusText}`)
+  }
+  // Size cap from the declared Content-Length when present…
+  const contentLength = Number(res.headers.get('content-length') ?? '') || 0
+  if (contentLength > MEDIA_DOWNLOAD_MAX_BYTES) {
+    throw new Error(`CDN download too large: ${contentLength} bytes > ${MEDIA_DOWNLOAD_MAX_BYTES}`)
+  }
+  // …and enforced while streaming — never a blind arrayBuffer() read.
+  const chunks: Buffer[] = []
+  let total = 0
+  if (res.body) {
+    for await (const chunk of res.body) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      total += buf.length
+      if (total > MEDIA_DOWNLOAD_MAX_BYTES) {
+        throw new Error(`CDN download exceeded ${MEDIA_DOWNLOAD_MAX_BYTES} bytes`)
+      }
+      chunks.push(buf)
+    }
+  }
+  return Buffer.concat(chunks)
+}
+
+/** Resolve the AES key for an image item (item.aeskey preferred, then media.aes_key). */
+function imageKeyInput(item: ImageItem): string | undefined {
+  return item.aeskey || item.media?.aes_key
+}
+
+/**
+ * Download and decrypt one inbound image.
  */
 export async function downloadImage(params: {
   item: ImageItem
@@ -109,15 +156,17 @@ export async function downloadImage(params: {
   const cdnBaseUrl = params.cdnBaseUrl || WEIXIN_CDN_BASE_URL
   const fetchFn = params.fetchFn ?? globalThis.fetch
   const media = item.media ?? {}
-  const fullUrl = media.full_url?.trim()
   const itemUrl = item.url?.trim()
-  const encParam = media.encrypt_query_param?.trim()
   // Empty encrypt_query_param with no full_url/item.url: fail BEFORE any
   // fetch (this used to be dead code — buildCdnDownloadUrl('') is truthy).
+  const fullUrl = media.full_url?.trim()
+  const encParam = media.encrypt_query_param?.trim() ?? ''
   if (!fullUrl && !itemUrl && !encParam) {
     throw new Error('image item has no url/encrypt_query_param')
   }
-  const rawUrl = fullUrl || itemUrl || buildCdnDownloadUrl(encParam ?? '', cdnBaseUrl)
+  // Priority preserved from the original port: full_url → item.url →
+  // client-built URL from encrypt_query_param.
+  const rawUrl = fullUrl || itemUrl || buildCdnDownloadUrl(encParam, cdnBaseUrl)
   const cdnUrl = assertCdnUrl(rawUrl, params.extraTrustedHosts)
 
   const res = await fetchCdnWithRedirects(cdnUrl, params.extraTrustedHosts, fetchFn)
@@ -143,9 +192,97 @@ export async function downloadImage(params: {
     }
   }
   const encrypted = Buffer.concat(chunks)
-  const keyInput = item.aeskey || media.aes_key
+  const keyInput = imageKeyInput(item)
   if (!keyInput) throw new Error('image item has no aes key')
   const key = parseAesKey(keyInput)
   const data = decryptAesEcb(encrypted, key)
   return { data, ext: detectImageExt(data) }
+}
+
+// ---------------------------------------------------------------- P1-1: file / video
+
+/**
+ * Common CDN media reference shared by file/video/voice items
+ * (official CDNMedia: encrypt_query_param + full_url + aes_key).
+ */
+export interface CdnMediaRef {
+  encrypt_query_param?: string
+  full_url?: string
+  aes_key?: string
+}
+
+/**
+ * P1-1: download and decrypt one inbound file/video media object. Same
+ * hardened pipeline as images (assertCdnUrl, manual redirects, streamed size
+ * cap); the decrypted bytes are returned raw — callers name the file.
+ */
+export async function downloadMediaObject(params: {
+  media: CdnMediaRef
+  cdnBaseUrl?: string
+  extraTrustedHosts?: readonly string[]
+  fetchFn?: typeof fetch
+}): Promise<Buffer> {
+  const cdnBaseUrl = params.cdnBaseUrl || WEIXIN_CDN_BASE_URL
+  const fetchFn = params.fetchFn ?? globalThis.fetch
+  const encrypted = await fetchCdnEncrypted({
+    encParam: params.media.encrypt_query_param?.trim() ?? '',
+    fullUrl: params.media.full_url?.trim(),
+    cdnBaseUrl,
+    extraTrustedHosts: params.extraTrustedHosts,
+    fetchFn,
+  })
+  const keyInput = params.media.aes_key
+  if (!keyInput) throw new Error('media item has no aes key')
+  const key = parseAesKey(keyInput)
+  return decryptAesEcb(encrypted, key)
+}
+
+// ---------------------------------------------------------------- P1-1: mime table
+
+/**
+ * P1-1: extension → MIME for inbound file attachments (curated set covering
+ * the documents/archives/media types WeChat users actually send; unknown
+ * extensions fall back to application/octet-stream).
+ */
+const MIME_BY_EXT: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  csv: 'text/csv',
+  html: 'text/html',
+  htm: 'text/html',
+  json: 'application/json',
+  xml: 'application/xml',
+  zip: 'application/zip',
+  rar: 'application/vnd.rar',
+  '7z': 'application/x-7z-compressed',
+  gz: 'application/gzip',
+  tar: 'application/x-tar',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  m4a: 'audio/mp4',
+  amr: 'audio/amr',
+  silk: 'audio/silk',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  avi: 'video/x-msvideo',
+  mkv: 'video/x-matroska',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+}
+
+/** Filename → MIME (extension-based; unknown → application/octet-stream). */
+export function mimeFromFilename(fileName: string | undefined): string {
+  const ext = (fileName ?? '').split('.').pop()?.toLowerCase() ?? ''
+  return MIME_BY_EXT[ext] ?? 'application/octet-stream'
 }

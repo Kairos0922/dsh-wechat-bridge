@@ -20,12 +20,12 @@ import path from 'node:path'
 import { resolveDshHome } from '../home.ts'
 
 /**
- * A session id is always the bridge's own `wechat-` namespaced form (see
- * `newSessionId()`: `wechat-<base36-ts>-<base36-rand>`). Anything else is
- * untrusted garbage — M10 drops such entries at sanitize time instead of
- * trusting them as routing keys.
+ * Session ids are opaque DSH identifiers. They are persisted only after a
+ * conservative character/length check; the bridge must not assume every
+ * session was created by its own `/new` command because Web-created sessions
+ * can be explicitly opened to WeChat.
  */
-const SESSION_ID_RE = /^wechat-[0-9a-z-]+$/
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 
 /**
  * A peer id is a WeChat contact id string: non-empty, bounded, and free of
@@ -84,6 +84,8 @@ export interface BridgeStateData {
   peerSessions: Record<string, string>
   /** sessionId → owning peer id (survives restart for reply routing). */
   sessionOwners: Record<string, string>
+  /** sessionId → whether a trusted WeChat peer may access it. */
+  sessionAccess: Record<string, boolean>
   /**
    * sessionId → peer id that created it. Survives restart so `/close` and
    * orphan handling can tell who may reclaim a session. Old state files
@@ -125,6 +127,7 @@ export function sanitizeState(value: unknown): BridgeStateData {
     pairedUserIds: [],
     peerSessions: {},
     sessionOwners: {},
+    sessionAccess: {},
     sessionCreators: {},
     releasedSessions: [],
     contextTokens: {},
@@ -183,6 +186,13 @@ export function sanitizeState(value: unknown): BridgeStateData {
       if (isSessionId(session) && isPeerId(peer)) sessionOwners[session] = peer
     }
   }
+  const sessionAccess: Record<string, boolean> = {}
+  const rawAccess = record.sessionAccess
+  if (typeof rawAccess === 'object' && rawAccess !== null) {
+    for (const [session, enabled] of Object.entries(rawAccess as Record<string, unknown>)) {
+      if (isSessionId(session) && typeof enabled === 'boolean') sessionAccess[session] = enabled
+    }
+  }
   const sessionCreators: Record<string, string> = {}
   const rawCreators = record.sessionCreators
   if (typeof rawCreators === 'object' && rawCreators !== null) {
@@ -210,6 +220,7 @@ export function sanitizeState(value: unknown): BridgeStateData {
     pairedUserIds,
     peerSessions,
     sessionOwners,
+    sessionAccess,
     sessionCreators,
     releasedSessions,
     contextTokens,
@@ -225,6 +236,7 @@ export class BridgeState {
   private readonly warn: (message: string) => void
   private peerSessions = new Map<string, string>()
   private sessionOwners = new Map<string, string>()
+  private sessionAccess = new Map<string, boolean>()
   private sessionCreators = new Map<string, string>()
   private releasedSessions = new Set<string>()
   private contextTokens = new Map<string, string>()
@@ -246,6 +258,7 @@ export class BridgeState {
       pairedUserIds: [],
       peerSessions: {},
       sessionOwners: {},
+      sessionAccess: {},
       sessionCreators: {},
       releasedSessions: [],
       contextTokens: {},
@@ -286,6 +299,7 @@ export class BridgeState {
     }
     this.peerSessions = new Map(Object.entries(loaded.peerSessions))
     this.sessionOwners = new Map(Object.entries(loaded.sessionOwners))
+    this.sessionAccess = new Map(Object.entries(loaded.sessionAccess))
     this.sessionCreators = new Map(Object.entries(loaded.sessionCreators))
     for (const id of loaded.releasedSessions) this.releasedSessions.add(id)
     this.contextTokens = new Map(Object.entries(loaded.contextTokens))
@@ -327,6 +341,21 @@ export class BridgeState {
 
   listSessionOwners(): Array<[string, string]> {
     return [...this.sessionOwners.entries()]
+  }
+
+  isSessionAccessEnabled(sessionId: string): boolean {
+    return this.sessionAccess.get(sessionId) === true
+  }
+
+  setSessionAccess(sessionId: string, enabled: boolean): void {
+    if (this.sessionAccess.get(sessionId) !== enabled) {
+      this.sessionAccess.set(sessionId, enabled)
+      this.schedule()
+    }
+  }
+
+  listSessionAccess(): Array<[string, boolean]> {
+    return [...this.sessionAccess.entries()]
   }
 
   getContextToken(peerId: string): string | null {
@@ -459,6 +488,7 @@ export class BridgeState {
       pairedUserIds: [...this.pairedUserIds],
       peerSessions: Object.fromEntries(this.peerSessions),
       sessionOwners: Object.fromEntries(this.sessionOwners),
+      sessionAccess: Object.fromEntries(this.sessionAccess),
       sessionCreators: Object.fromEntries(this.sessionCreators),
       releasedSessions: [...this.releasedSessions],
       contextTokens: Object.fromEntries(this.contextTokens),

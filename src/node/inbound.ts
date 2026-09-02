@@ -23,11 +23,14 @@ import {
   ITEM_TEXT,
   ITEM_VIDEO,
   ITEM_VOICE,
+  type FileItem,
   type ImageItem,
   type InboundEvent,
   type InboundMessage,
   type MessageItem,
+  type VideoItem,
 } from '../gateway/types.ts'
+import { mimeFromFilename, type CdnMediaRef } from '../gateway/media.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { sendTextToPeer } from './outbound.ts'
 import { resolveDshHome } from './presets.ts'
@@ -105,34 +108,109 @@ export function extractText(message: InboundMessage, opts: ExtractTextOptions = 
  * agent (differentiator #2 — image-in-session). Media bytes never leave the
  * machine beyond the CDN download itself. The peer gets a count-only ack.
  */
+function writeInboundMedia(dir: string, file: string, data: Buffer): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  fs.chmodSync(dir, 0o700)
+  const temp = `${file}.tmp-${process.pid}-${Date.now()}`
+  try {
+    fs.writeFileSync(temp, data, { mode: 0o600 })
+    fs.chmodSync(temp, 0o600)
+    fs.renameSync(temp, file)
+  } finally {
+    try { fs.unlinkSync(temp) } catch {}
+  }
+}
+
+function assertVideoBytes(data: Buffer): void {
+  if (data.length < 12 || data.subarray(4, 8).toString('ascii') !== 'ftyp') {
+    throw new Error('video payload is not an ISO BMFF/MP4 object')
+  }
+}
+
 async function handleImages(
   node: WechatBridgeNode,
   peerId: string,
   message: InboundMessage,
   images: ImageItem[],
   text: string,
-): Promise<void> {
+  dispatch = true,
+): Promise<string[]> {
   const sessionId = node.activeSession(peerId)?.id ?? 'unbound'
   const dir = path.join(node.resolved.mediaDir ?? defaultMediaDir(), String(sessionId))
-  fs.mkdirSync(dir, { recursive: true })
   const saved: string[] = []
   for (let i = 0; i < images.length; i++) {
     try {
       const { data, ext } = await node.ctx.wechat.downloadImage(images[i]!)
       const file = path.join(dir, `wechat-${message.message_id ?? Date.now()}-${i}.${ext}`)
-      fs.writeFileSync(file, data)
+      writeInboundMedia(dir, file, data)
       saved.push(file)
     } catch (err) {
       node.ctx.logger.warn('[dsh-wechat-bridge] image download failed: %s', String(err))
     }
   }
+  if (!dispatch) return saved
+  const parts = [text.trim()]
+  if (saved.length > 0) parts.push(`📷 用户发来 ${saved.length} 张图片（本地路径）:\n${saved.map((p) => `- ${p}`).join('\n')}`)
+  const combined = parts.filter(Boolean).join('\n\n')
+  if (saved.length > 0) void sendTextToPeer(node, peerId, `✅ 已收到 ${saved.length} 张图片，交给会话处理中…`, { kind: 'system' })
+  if (combined.trim()) await node.handleText(peerId, combined)
+  return saved
+}
+
+/** Strip path separators / traversal from a WeChat-provided file name. */
+function sanitizeFileName(raw: string | undefined, fallback: string): string {
+  const base = (raw ?? '').split(/[/\\]/).pop()?.trim() ?? ''
+  if (!base || base === '.' || base === '..') return fallback
+  return base.slice(0, 120)
+}
+
+/**
+ * P1-1: download inbound file/video attachments to the media dir and hand
+ * the paths to the agent (same policy as images: local bytes only, count ack
+ * to the peer). Port of the official downloadMediaFromItem FILE/VIDEO
+ * branches (media-download.ts:100-146), minus SILK voice (transcription-only).
+ */
+async function handleMediaFiles(
+  node: WechatBridgeNode,
+  peerId: string,
+  message: InboundMessage,
+  entries: Array<{ media: CdnMediaRef; kind: 'file' | 'video'; fileName?: string }>,
+  text: string,
+  extraPaths: string[] = [],
+): Promise<void> {
+  const sessionId = node.activeSession(peerId)?.id ?? 'unbound'
+  const dir = path.join(node.resolved.mediaDir ?? defaultMediaDir(), String(sessionId))
+  const saved: string[] = [...extraPaths]
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!
+    try {
+      const data = await node.ctx.wechat.downloadMediaObject(entry.media)
+      if (entry.kind === 'video') assertVideoBytes(data)
+      const stamp = message.message_id ?? Date.now()
+      let fileName: string
+      if (entry.kind === 'file') {
+        fileName = sanitizeFileName(entry.fileName, `file-${stamp}-${i}.bin`)
+      } else {
+        // Videos are mp4 on this channel (protocol.md §4); keep a safe name.
+        fileName = `video-${stamp}-${i}.mp4`
+      }
+      const file = path.join(dir, `wechat-${stamp}-${i}-${fileName}`)
+      writeInboundMedia(dir, file, data)
+      saved.push(file)
+      debugLog({ event: 'inbound-media-saved', kind: entry.kind, msgId: message.message_id ?? null, file: path.basename(file), bytes: data.length, mime: mimeFromFilename(fileName) })
+    } catch (err) {
+      node.ctx.logger.warn('[dsh-wechat-bridge] %s download failed: %s', entry.kind, String(err))
+    }
+  }
   const parts = [text.trim()]
   if (saved.length > 0) {
-    parts.push(`📷 用户发来 ${saved.length} 张图片（本地路径）:\n${saved.map((p) => `- ${p}`).join('\n')}`)
+    const lines = saved.map((p) => `- ${p}`).join('\n')
+    const icon = entries.some((e) => e.kind === 'video') ? '🎬' : '📎'
+    parts.push(`${icon} 用户发来 ${saved.length} 个文件/视频（本地路径）:\n${lines}`)
   }
   const combined = parts.filter(Boolean).join('\n\n')
   if (saved.length > 0) {
-    void sendTextToPeer(node, peerId, `✅ 已收到 ${saved.length} 张图片，交给会话处理中…`, { kind: 'system' })
+    void sendTextToPeer(node, peerId, `✅ 已收到 ${saved.length} 个文件/视频，交给会话处理中…`, { kind: 'system' })
   }
   if (!combined.trim()) return
   await node.handleText(peerId, combined)
@@ -148,6 +226,14 @@ export function isGroupMessage(message: InboundMessage): boolean {
 export async function handleInbound(node: WechatBridgeNode, payload: InboundEvent): Promise<void> {
   const { message, senderId, contextToken, runId } = payload
   if (!senderId) return
+
+  // P1-6: bridge-level pause — logged, seen-dedup NOT touched (the message is
+  // deliberately dropped before the gate; un-pausing must not replay it).
+  if (node.isPaused()) {
+    debugLog({ event: 'gate', from: senderId, paused: true })
+    node.ctx.logger.info('[dsh-wechat-bridge] paused: dropping inbound from %s', senderId)
+    return
+  }
 
   // ---- allowlist gate: the security boundary ------------------------------
   // 1:1 = global allowFrom. Groups = room-level two-tier gate: the room must
@@ -187,8 +273,21 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   const images = (message.item_list ?? [])
     .filter((item) => item?.type === ITEM_IMAGE)
     .map((item) => item.image_item ?? {})
+  // P1-1: file/video items with a downloadable CDN reference.
+  const fileEntries = (message.item_list ?? [])
+    .filter((item) => item?.type === ITEM_FILE && (item.file_item?.media?.encrypt_query_param || item.file_item?.media?.full_url))
+    .map((item) => ({ media: item.file_item!.media as CdnMediaRef, kind: 'file' as const, fileName: (item.file_item as FileItem).file_name }))
+  const videoEntries = (message.item_list ?? [])
+    .filter((item) => item?.type === ITEM_VIDEO && (item.video_item?.media?.encrypt_query_param || item.video_item?.media?.full_url))
+    .map((item) => ({ media: item.video_item!.media as CdnMediaRef, kind: 'video' as const }))
   // Group quotes may carry a non-allowlisted member's text — strip the body.
   const text = extractText(message, { includeQuoteBody: !groupId })
+  // P1-1: a voice message with NO transcription field must not be silently
+  // dropped (the sender believes the bot heard them) — surface it as a
+  // non-text part the agent can acknowledge.
+  const voiceWithoutText = (message.item_list ?? []).some(
+    (item) => item?.type === ITEM_VOICE && !String(item.voice_item?.text ?? '').trim(),
+  )
 
   node.setPeerTarget(peerKey, target)
   node.setPeerContextToken(peerKey, contextToken ?? null)
@@ -206,14 +305,32 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   node.retryApprovalPrompt(peerKey)
   node.retryCriticalMessages(peerKey)
 
+  if (images.length > 0 && (fileEntries.length > 0 || videoEntries.length > 0)) {
+    // Mixed media must become one agent turn. Download both sets first, then
+    // attach every local path and the original text once in stable order.
+    const imagePaths = await handleImages(node, peerKey, message, images, '', false)
+    await handleMediaFiles(node, peerKey, message, [...fileEntries, ...videoEntries], text, imagePaths)
+    return
+  }
   if (images.length > 0) {
     await handleImages(node, peerKey, message, images, text)
     return
   }
-  if (!text.trim()) {
-    node.ctx.logger.info('[dsh-wechat-bridge] ignoring non-text non-image message from %s', senderId)
+  if (fileEntries.length > 0 || videoEntries.length > 0) {
+    await handleMediaFiles(node, peerKey, message, [...fileEntries, ...videoEntries], text)
     return
   }
+  const uncertainNotice = node.takeUncertainNotice(peerKey)
+  const effectiveText = voiceWithoutText
+    ? `${uncertainNotice ? `${uncertainNotice}\n` : ''}${text.trim()}${text.trim() ? '\n' : ''}[语音消息：微信未提供转写文本，无法读取内容]`.trim()
+    : `${uncertainNotice ? `${uncertainNotice}\n` : ''}${text}`
+  if (!effectiveText.trim()) {
+    node.ctx.logger.info('[dsh-wechat-bridge] ignoring non-text non-media message from %s', senderId)
+    return
+  }
+  if (voiceWithoutText) {
+    void sendTextToPeer(node, peerKey, '🎙 收到语音，但微信未提供转写文本，无法读取其内容；请改用文字或图片。', { kind: 'system' })
+  }
 
-  await node.handleText(peerKey, text)
+  await node.handleText(peerKey, effectiveText)
 }

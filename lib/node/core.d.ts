@@ -76,6 +76,8 @@ export interface ResolvedNodeConfig {
     notifyMinTurnSec: number;
     /** Delete media/export files older than this many days. */
     mediaRetentionDays: number;
+    /** Coalesce rapid plain-text inbound messages (0 disables). */
+    inboundDebounceMs: number;
     /** Group chats the bridge may serve: room id → allowed senders. */
     allowGroups: Array<{
         roomId: string;
@@ -104,6 +106,10 @@ export declare const APPROVAL_COALESCE_PREFIX = "approval:";
  * outage — a long outage must not dump a wall of stale messages.
  */
 export declare const CRITICAL_RESEND_CAP = 3;
+/** Hard upper bound for best-effort outbound drain during synchronous dispose. */
+export declare const DRAIN_DEADLINE_MS = 4000;
+/** Allowlist entries left unused this long are likely inert configuration. */
+export declare const ALLOWLIST_ZERO_MATCH_MS: number;
 /** First-run welcome message sent to the pairer right after QR confirmation. */
 export declare function buildWelcomeMessage(opts: {
     allowFromEmpty: boolean;
@@ -126,6 +132,21 @@ export declare class WechatBridgeNode {
     readonly resolved: ResolvedNodeConfig;
     readonly state: BridgeState;
     readonly outbox: Outbox;
+    /**
+     * P0 (OpenClaw 2.0 alignment): per-peer record of the latest UNCERTAIN
+     * outbound send (timed out without a confirmed server result). Never
+     * auto-resent (duplicate risk); consumed as a one-line system note on the
+     * peer's next inbound text message (takeUncertainNotice).
+     */
+    private readonly uncertainSends;
+    /**
+     * P1-6 (OpenClaw 2.0 alignment #131129): allowFrom entries that matched at
+     * least one inbound sender. Entries absent after ALLOWLIST_ZERO_MATCH_MS
+     * are probably inert (wxid normalization drift) and get a startup+runtime
+     * warning — an allowlist guard that silently never fires is a security bug.
+     */
+    private readonly allowFromHits;
+    private readonly allowFromWarned;
     /** peerId → active session (persisted through state). */
     private readonly peerSessions;
     /** sessionId → owning peer (so outbound events route back correctly). */
@@ -155,6 +176,13 @@ export declare class WechatBridgeNode {
     private readonly pendingAnswerRescued;
     /** Per-sender serialization of inbound message handling (M9 race fix). */
     private readonly inboundChains;
+    /** Coalesces rapid plain-text inbound messages per conversation. */
+    private readonly debouncer;
+    /**
+     * When the current config was mounted, used to avoid warning immediately
+     * about allowFrom entries that have not had time to match.
+     */
+    private readonly allowFromStartedAt;
     /**
      * Peers whose approval prompt failed to deliver (outbox drop). The prompt
      * is re-pushed on the peer's next inbound message — the user is at the
@@ -172,6 +200,7 @@ export declare class WechatBridgeNode {
     /** Mount the bridge: outbound digest, approval answerer, inbound gate. */
     attach(): void;
     dispose(): void;
+    private finishDispose;
     private dispatchOutboxEntry;
     /** One actual send for an outbox entry (kind-dispatch). */
     private sendWithEntry;
@@ -228,6 +257,10 @@ export declare class WechatBridgeNode {
     /** Remember the peer's outbound target (room id for groups). */
     setPeerTarget(peerId: string, target: string): void;
     outboxPausedUntil(): number | null;
+    private rememberUncertain;
+    /** Consume the warning for the peer's next inbound text contact. */
+    takeUncertainNotice(peerKey: string): string | null;
+    private disposeInboundDebounce;
     /** The owning peer of a session, if known. */
     peerOf(sessionId: string): string | null;
     /** The peer's active session, if any. */
@@ -250,6 +283,7 @@ export declare class WechatBridgeNode {
     private pairedUserId;
     /** Whether a WeChat sender may drive the bridge: configured allowFrom ∪ all pairing-confirmed scanners. */
     isAllowed(senderId: string): Promise<boolean>;
+    private warnInertAllowFrom;
     /** All pairing-confirmed trusted WeChat ids (persisted). */
     listPairedUserIds(): string[];
     /** The full trust set: configured allowFrom ∪ persisted paired scanners ∪ credential owner. */
@@ -260,8 +294,15 @@ export declare class WechatBridgeNode {
      * A scanner whose pairing the gateway confirmed but whose trust admission
      * is held for operator confirmation in the settings panel (the trust set
      * was non-empty at scan time — pairing ≠ blind trust anymore).
+     * P2-6: held requests carry a TTL (10 min, cf. the official pairing-store
+     * 1h pending TTL) and every admission transition is audit-logged to
+     * events.jsonl (requested/approved/rejected/expired).
      */
     private pendingTrust;
+    private pendingTrustAt;
+    /** Held trust requests expire — an operator cannot confirm a stale scan. */
+    private static readonly PENDING_TRUST_TTL_MS;
+    private pendingTrustExpired;
     get pendingTrustUserId(): string | null;
     /** Admit the held scanner into the persisted paired set. */
     confirmPendingTrust(): Promise<boolean>;
@@ -280,12 +321,17 @@ export declare class WechatBridgeNode {
     private readonly rejectedNoticeAt;
     private rejectedWindowStart;
     private rejectedWindowCount;
+    private pausedState;
+    setPaused(paused: boolean): void;
+    isPaused(): boolean;
     /**
      * Notify all trusted peers that a stranger messaged the bot — rate-limited:
-     * at most once per 10 min per stranger, at most 3 per 10 min globally.
-     * Without this, a spamming stranger would starve the shared outbox budget
-     * (system notices outrank answers) — the transparency feature must not
-     * become a denial-of-service amplifier.
+     * at most once per HOUR per stranger (aligned with the official
+     * pairing-challenge resend throttle: a stranger's repeat messages must not
+     * re-notify the owner), at most 3 per 10 min globally. Without this, a
+     * spamming stranger would starve the shared outbox budget (system notices
+     * outrank answers) — the transparency feature must not become a
+     * denial-of-service amplifier.
      */
     notifyRejectedPeers(senderId: string): void;
     /** Set (and persist) the peer's active session. */
@@ -300,8 +346,16 @@ export declare class WechatBridgeNode {
      * silently changes hands to another peer later.
      */
     releaseSession(peerId: string): void;
+    /** Enable or disable access to a session from trusted WeChat peers. */
+    enableSessionWechat(sessionId: string): void;
+    disableSessionWechat(sessionId: string): void;
+    isSessionWechatEnabled(sessionId: string): boolean;
+    /** Sessions explicitly opened for WeChat access. */
+    listAccessibleSessions(): Session[];
     /** Sessions this peer owns, most-recent-first. */
     sessionsForPeer(peerId: string): Session[];
+    /** Sessions visible to a trusted peer: owned or explicitly opened. */
+    sessionsAccessibleToPeer(peerId: string): Session[];
     /** Remember the peer's latest context token (echoed on replies). */
     setPeerContextToken(peerId: string, token: string | null): void;
     /** Remember the peer's latest run id (progress-card association). */
