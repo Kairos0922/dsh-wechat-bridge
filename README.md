@@ -85,6 +85,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | `maxMessageChars` | 2000 | 单条气泡上限 |
 | `fileThresholdChars` | 0 | 长文转文件阈值（>0 时超长回复自动变 .md 附件；0=关闭） |
 | `cardMode` | `off` | 长图卡片模式（`off` / `long`，需本机 Chrome） |
+| `progressToolPrefixes` | `[]` | 工具进度卡片前缀（命中工具名的工具在任务中发进度卡片）。**注意：当前微信后端对卡片 item 静默丢弃，配置后也暂不显示**；后端支持后填前缀（如 `["bash","fs"]`）即启用 |
 | `approvalTimeoutSec` | 600 | 审批等待超时（超时默认拒绝） |
 | `notifyOnComplete` | false | 长任务完成时主动播报（仅私聊） |
 | `notifyRejected` | false | 陌生账号尝试联系时通知信任用户 |
