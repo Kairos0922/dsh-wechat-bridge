@@ -32,6 +32,20 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 /**
+ * Shared contract for a session shown in the Web settings panel. The client
+ * (`./client.ts` Status.sessions) models EXACTLY this shape — keep both in
+ * lockstep; a drift here renders an empty/broken session list (see the H2
+ * incident). Both `/status` and `/sessions` emit this shape through
+ * `buildSessionInfo`.
+ */
+export interface SessionInfo {
+    id: string;
+    label: string;
+    status: string;
+    lastActivityAt: number;
+    enabled: boolean;
+}
+/**
  * Mirror of the platform's isTrustedApiRequest (dsh-client-connection):
  * true when the Host is ours (loopback or declared trusted) and any attached
  * browser markers are same-origin. Exported for tests.

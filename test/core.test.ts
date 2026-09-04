@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { buildWelcomeMessage, WechatBridgeNode } from '../src/node/core.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 const CONFIG = {
   allowFrom: ['peer-a@im.wechat'],
@@ -470,6 +471,7 @@ function fakeAttachCtx(overrides: Record<string, unknown> = {}) {
       return () => {}
     },
     sessions: { list: () => [], get: () => undefined },
+    agents: { get: () => undefined },
     ...overrides,
   }
   return { ctx, handlers }
@@ -570,11 +572,16 @@ test('revokePairedUser: unpairs, cascades bindings/tokens/ownership, notifies', 
     node.state.setPeerSession('user-b@im.wechat', 'wechat-s1')
     node.state.setSessionOwner('wechat-s1', 'user-b@im.wechat')
     node.state.setContextToken('user-b@im.wechat', 'tok')
+    // Populate the RUNTIME ownership map too (setActiveSession fills it).
+    node.setActiveSession('user-b@im.wechat', SessionId('wechat-s1'))
+    assert.equal(node.peerOf('wechat-s1'), 'user-b@im.wechat', 'runtime owner set before revoke')
     assert.equal(await node.revokePairedUser('nobody@im.wechat'), false, 'unknown id rejected')
     assert.equal(await node.revokePairedUser('user-b@im.wechat'), true)
     assert.ok(!node.state.listPairedUserIds().includes('user-b@im.wechat'))
     assert.ok(node.state.getPeerSession('user-b@im.wechat') == null, 'binding cleared')
     assert.equal(node.state.listSessionOwners().some(([id]) => id === 'wechat-s1'), false)
+    // Runtime cascade: the revoked user must no longer own any session.
+    assert.equal(node.peerOf('wechat-s1'), null, 'runtime ownership cleared on revoke')
     node.dispose()
   }))
 

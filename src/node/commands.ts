@@ -79,7 +79,7 @@ function timeAgo(epochMs: number): string {
 }
 
 /** The active session's first user prompt, for list labels. */
-function sessionLabel(session: Session): string {
+export function sessionLabel(session: Session): string {
   for (const event of session.events) {
     if (event.type === 'user/message') {
       const blocks = event.data.content as unknown as Array<{ type: string; text?: string }>

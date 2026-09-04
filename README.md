@@ -11,7 +11,6 @@
 - **移动端完整体验**：Markdown 保真渲染、思考进度心跳、任务清单快照、编号菜单、长文自动分段、完成耗时提示
 - **媒体双向（图片 / 文件 / 视频）**：微信发来的图片经 CDN 下载、AES 解密后落本机工作区交给 agent；文件/视频同样下载落盘（mime 识别），无转写语音明确告知而非静默；bot 也可外发图片、文件附件（`/export` 会话导出、长文转文件）与视频（`/video`），实测正常显示
 - **多用户扫码即配对**：在 Web 设置面板扫码配对，首个用户自动信任（bootstrap），后续用户需在面板确认后加入（见「安全模型」）；每个用户拥有独立会话、上下文与模型/工作区偏好，互不可见
-- **移动端完整体验**：Markdown 保真渲染、思考进度心跳、任务清单快照、编号菜单、长文自动分段、完成耗时提示
 - **上下文透明**：每轮结束附上下文用量（`🧮 12.0k / 32.0k`），接近上限提示自动压缩并建议 `/new`；自动压缩发生时主动告知
 - **可打断**：执行中回复「停 / 停止 / 算了」立即取消，停止后附进度摘要与 `/retry` 引导；断线恢复自动通知
 - **安全边界**：白名单外的消息只记日志、绝不喂给模型（可选 `notifyRejected` 提醒）；危险操作经审批，在微信里回复 `/yes` `/no` 或编号即可决定
@@ -141,7 +140,7 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 ## 开发
 
 ```sh
-pnpm install && pnpm verify   # build → bundle → node --check → 220 项测试
+pnpm install && pnpm verify   # build → bundle → node --check → 242 项测试
 scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 ```
 

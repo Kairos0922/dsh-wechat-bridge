@@ -22,6 +22,8 @@ export declare const VIDEO_MAX_BYTES: number;
  * Exported for tests.
  */
 export declare function validateVideoPath(node: WechatBridgeNode, resolvedPath: string): string | null;
+/** The active session's first user prompt, for list labels. */
+export declare function sessionLabel(session: Session): string;
 /** Sessions ordered most-recent-first. */
 export declare function listSessions(node: WechatBridgeNode): Session[];
 /** Parse `/new` arguments: an optional mode (matching a discovered preset). */

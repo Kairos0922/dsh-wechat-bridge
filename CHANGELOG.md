@@ -41,6 +41,14 @@
 
 ### 修复
 
+- **Web 面板跨层契约修复（审查批次）**：
+  - `pause` 往返死锁：客户端原先发 `String(!paused)`，服务端 `Boolean("false")` 恒真 → 面板暂停后无法恢复。改客户端发布尔、服务端仅 `=== true` 才暂停。
+  - `/status` 500 崩屏：客户端无 `res.ok`/`data.ok` 校验，把 `{ok:false}` 当合法 Status 渲染，缺 `prefs/outbox` 时白屏。改非 2xx/非 ok 时保留上次状态 + 子字段可选链兜底。
+  - **共享会话面板恒空**：`/status` 从不产 `sessions`，且 `/sessions` 形状与客户端 `Status.sessions`（`{id,label,status,lastActivityAt,enabled}`）不符。新增共享 `SessionInfo` 契约，`/status` 与 `/sessions` 统一产出该形状（含 agent 状态映射）。
+  - **吊销残留**：`revokePairedUser` 只清了持久化 state，运行时 `sessionOwners`（`peerOf`/审批路由读取）未级联，吊销后该用户仍可能在进程内收到其会话的出站/审批。改运行时归属级联删除 + 取消其活跃 turn。
+  - **入站媒体 message_id 路径穿越**：`message.message_id` 未经校验直接拼文件名。新增 `sanitizeMessageId`（限 `[0-9a-zA-Z_-]{1,64}`，否则回退数字戳），图片/文件/视频路径统一净化。
+  - **README/release 对齐**：测试数 220→242；README 重复「移动端完整体验」行删除；RELEASING 明确 `dry-run/probe-media/wrap-client` 为开发期工具不进包。
+
 - **长任务出站静默根因修正（2026-08-19 实测）**：`prepare failed` 的归因从
   "context_token 时效"修正为**会话窗口出站配额**——服务器对每个用户入站窗口
   允许约 10 条成功出站（三次实测均恰好第 11 条失败），超出后一切发送失败且

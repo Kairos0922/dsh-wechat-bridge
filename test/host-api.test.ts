@@ -89,6 +89,8 @@ interface FakeNode {
   revokePairedUser(userId: string): Promise<boolean>
   isPaused(): boolean
   setPaused(paused: boolean): void
+  isSessionWechatEnabled(sessionId: string): boolean
+  ctx: { sessions: { list(): Array<{ id: string; header: { createdAt: number }; events: Array<{ time?: number }>; seq?: number }> }; agents: { get(): { status?: string } | undefined } }
 }
 
 function mount(opts: {
@@ -128,6 +130,13 @@ function mount(opts: {
     revokePairedUser: async () => false,
     isPaused: () => false,
     setPaused: () => {},
+    isSessionWechatEnabled: () => false,
+    ctx: {
+      sessions: {
+        list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, events: [{ time: 500 }], seq: 0 }],
+      },
+      agents: { get: () => ({ status: 'running' }) },
+    },
     ...opts.node,
   }
   registerHostApi(ctx as never, gateway as never, node as never, { trustedHosts: TRUSTED })
@@ -205,4 +214,37 @@ test('status answers 200 with the new pending fields', async () => {
   assert.deepEqual(body.pendingPair, { userId: 'u1', accountId: 'bot-2' })
   assert.equal(body.pendingTrustUserId, 'u2')
   assert.deepEqual(body.pairedUserIds, ['a@im.wechat'])
+})
+
+// Session contract (H2): /status and /sessions must emit the SAME shape the
+// client's `Status.sessions` models ({id,label,status,lastActivityAt,enabled}).
+// A drift renders an empty/broken session list. Here we pin the contract.
+test('status carries the sessions contract (label/status/lastActivityAt/enabled)', async () => {
+  const routes = mount({
+    node: {
+      isSessionWechatEnabled: (id: string) => id === 'wechat-1',
+      ctx: {
+        sessions: { list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, events: [{ time: 500 }], seq: 0 }] },
+        agents: { get: () => ({ status: 'running' }) },
+      },
+    },
+  })
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/status')!(fakeReq({ host: '127.0.0.1:3080' }, 'GET'), res)
+  const body = result().body as { ok: boolean; sessions: Array<{ id: string; label: string; status: string; lastActivityAt: number; enabled: boolean }> }
+  assert.equal(body.ok, true)
+  assert.equal(body.sessions.length, 1)
+  assert.deepEqual(body.sessions[0], { id: 'wechat-1', label: '(空会话)', status: '运行中', lastActivityAt: 500, enabled: true })
+})
+
+test('sessions endpoint emits the same contract shape', async () => {
+  const routes = mount()
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/sessions')!(fakeReq({ host: '127.0.0.1:3080' }, 'GET'), res)
+  const body = result().body as { ok: boolean; sessions: Array<{ id: string; label: string; status: string; lastActivityAt: number; enabled: boolean }> }
+  assert.equal(body.ok, true)
+  assert.equal(body.sessions[0].id, 'wechat-1')
+  for (const key of ['id', 'label', 'status', 'lastActivityAt', 'enabled'] as const) {
+    assert.ok(key in body.sessions[0]!, `session contract field missing: ${key}`)
+  }
 })

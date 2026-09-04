@@ -6,7 +6,9 @@ file: 快照过期、生产通道试探封禁），目的是让坑变成检查�
 ## 每次发版必查
 
 1. **files 白名单**：`package.json` 的 `files` 包含 bundle 全部必需文件：
-   `lib`、`cordis.patch.yml`、`scripts`、`README.md`、`LICENSE`
+   `lib`、`cordis.patch.yml`、`scripts/login.mjs`、`README.md`、`LICENSE`
+   注意 `dry-run.sh`、`probe-media.mjs`、`wrap-client.mjs` 是**开发期工具**，不进
+   发布包（`files` 不列入）；从仓库取，勿依赖 tarball
 2. **bundle 声明**：`package.json` 的 `dsh.bundle.patch` 指向存在的 `cordis.patch.yml`
 3. **语法与测试**：`pnpm verify`（build → bundle → `node --check lib/client.js`
    与 `lib/index.js` → `node --test test/*.test.ts`，退出码显式校验，全绿才继续）；

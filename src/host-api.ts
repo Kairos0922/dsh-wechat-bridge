@@ -18,10 +18,10 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import type { WechatGateway } from './gateway/index.ts'
 import { listModes } from './node/presets.ts'
-import { listSessions } from './node/commands.ts'
+import { listSessions, sessionLabel } from './node/commands.ts'
 import type { WechatBridgeNode } from './node/core.ts'
 
 /** Minimal structural typing for the dsh-web `webServer` service seam. */
@@ -47,6 +47,43 @@ const PAIR_VERIFY_CODE_PATH = `${BASE_PATH}/pair/verify-code`
 const PAUSE_PATH = `${BASE_PATH}/pause`
 const SESSIONS_PATH = `${BASE_PATH}/sessions`
 const SESSION_ACCESS_PATH = `${BASE_PATH}/session-access`
+
+/**
+ * Shared contract for a session shown in the Web settings panel. The client
+ * (`./client.ts` Status.sessions) models EXACTLY this shape — keep both in
+ * lockstep; a drift here renders an empty/broken session list (see the H2
+ * incident). Both `/status` and `/sessions` emit this shape through
+ * `buildSessionInfo`.
+ */
+export interface SessionInfo {
+  id: string
+  label: string
+  status: string
+  lastActivityAt: number
+  enabled: boolean
+}
+
+/** Map a running agent status to a stable display string. */
+function agentStatusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'running': return '运行中'
+    case 'idle': return '空闲'
+    default: return status ?? '空闲'
+  }
+}
+
+/** Build the Web-panel session contract for one DSH session. */
+function buildSessionInfo(node: WechatBridgeNode, session: Session): SessionInfo {
+  const last = session.events[session.events.length - 1]
+  const agent = (node.ctx as unknown as { agents?: { get(id: string): { status?: string } | undefined } }).agents?.get(session.id)
+  return {
+    id: session.id,
+    label: sessionLabel(session),
+    status: agentStatusLabel(agent?.status),
+    lastActivityAt: last?.time ?? session.header.createdAt,
+    enabled: node.isSessionWechatEnabled(session.id),
+  }
+}
 
 /** localhost, IPv6 loopback, or any IPv4 address in 127/8. */
 function isLoopbackHostname(hostname: string): boolean {
@@ -173,6 +210,7 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
           },
           lastSendError: gateway.lastSendError,
           health: gateway.healthSnapshot(),
+          sessions: listSessions(node).slice(0, 100).map((session) => buildSessionInfo(node, session)),
         })
       } catch (err) {
         ctx.logger.warn('[dsh-wechat-bridge] status endpoint failed: %s', String(err))
@@ -264,13 +302,7 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
         return
       }
       try {
-        const sessions = listSessions(node).slice(0, 100).map((session) => ({
-          id: session.id,
-          enabled: node.isSessionWechatEnabled(session.id),
-          createdAt: session.header.createdAt,
-          eventCount: session.events.length,
-          owner: node.peerOf(session.id),
-        }))
+        const sessions = listSessions(node).slice(0, 100).map((session) => buildSessionInfo(node, session))
         writeJson(res, 200, { ok: true, sessions })
       } catch (err) {
         ctx.logger.warn('[dsh-wechat-bridge] sessions endpoint failed: %s', String(err))
@@ -313,7 +345,10 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
       if (!guard(req, res) || !postOnly(req, res)) return
       try {
         const body = (await readJsonBody(req)) as { paused?: unknown } | null
-        node.setPaused(Boolean(body?.paused))
+        // Strict boolean: body.paused must be `true` exactly. Using
+        // Boolean(body.paused) would turn the string "false" (or "0") into
+        // true and make the panel unable to resume from a pause.
+        node.setPaused(body?.paused === true)
         writeJson(res, 200, { ok: true, paused: node.isPaused() })
       } catch (err) {
         ctx.logger.warn('[dsh-wechat-bridge] pause endpoint failed: %s', String(err))
