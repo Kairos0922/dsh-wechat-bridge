@@ -48,6 +48,7 @@
   - **吊销残留**：`revokePairedUser` 只清了持久化 state，运行时 `sessionOwners`（`peerOf`/审批路由读取）未级联，吊销后该用户仍可能在进程内收到其会话的出站/审批。改运行时归属级联删除 + 取消其活跃 turn。
   - **入站媒体 message_id 路径穿越**：`message.message_id` 未经校验直接拼文件名。新增 `sanitizeMessageId`（限 `[0-9a-zA-Z_-]{1,64}`，否则回退数字戳），图片/文件/视频路径统一净化。
   - **README/release 对齐**：测试数 220→242；README 重复「移动端完整体验」行删除；RELEASING 明确 `dry-run/probe-media/wrap-client` 为开发期工具不进包。
+  - **二维码面板自动刷新（L3）**：网关在 QR 过期/验证码受限时会重新签发新码并更新 `pairingQr`，但面板只取首张、永不感知变化（旧码扫码必失败）。改 `/status` 暴露当前 `qr` svg，面板轮询时同步刷新显示；配对按钮改为可手动重发起（不再是 `pairing` 永久禁用）。
 
 - **长任务出站静默根因修正（2026-08-19 实测）**：`prepare failed` 的归因从
   "context_token 时效"修正为**会话窗口出站配额**——服务器对每个用户入站窗口

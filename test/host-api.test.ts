@@ -107,6 +107,7 @@ function mount(opts: {
   const gateway = {
     status: 'authenticated',
     pairingMessage: '',
+    pairingQr: null,
     pendingPair: null,
     needVerifyCode: false,
     resolveCredentials: async () => null,
@@ -214,6 +215,28 @@ test('status answers 200 with the new pending fields', async () => {
   assert.deepEqual(body.pendingPair, { userId: 'u1', accountId: 'bot-2' })
   assert.equal(body.pendingTrustUserId, 'u2')
   assert.deepEqual(body.pairedUserIds, ['a@im.wechat'])
+})
+
+// L3: /status must expose the CURRENT pairing QR svg (null when not pairing),
+// so the panel can auto-refresh a stale code that can never be scanned.
+test('status exposes the current pairing qr svg', async () => {
+  const routes = mount({
+    gateway: { pairingQr: { scanData: 'x', svg: '<svg>live</svg>' } },
+  })
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/status')!(fakeReq({ host: '127.0.0.1:3080' }, 'GET'), res)
+  const body = result().body as { ok: boolean; qr: string | null }
+  assert.equal(body.ok, true)
+  assert.equal(body.qr, '<svg>live</svg>')
+})
+
+test('status returns qr:null when not pairing', async () => {
+  const routes = mount()
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/status')!(fakeReq({ host: '127.0.0.1:3080' }, 'GET'), res)
+  const body = result().body as { ok: boolean; qr: string | null }
+  assert.equal(body.ok, true)
+  assert.equal(body.qr, null)
 })
 
 // Session contract (H2): /status and /sessions must emit the SAME shape the

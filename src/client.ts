@@ -159,6 +159,8 @@ interface Status {
   ok: boolean
   status: string
   pairingMessage: string
+  /** L3: current QR svg — refreshes as the gateway reissues the code. */
+  qr?: string | null
   /** P0-1: gateway is waiting for the numeric verify code during pairing. */
   needVerifyCode?: boolean
   /** P1-6: bridge-level pause (inbound ignored, state preserved). */
@@ -289,6 +291,27 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
       setPairing(false)
     }
   }
+
+  // L3: keep the displayed QR fresh. The gateway reissues the code on expiry /
+  // verify_code_blocked (gateway/index.ts expired branch re-emits a new
+  // pairingQr). Polling /status (already every 3s via useStatus) reflects
+  // that as .qr; sync it into the panel whenever it changes so a stale QR
+  // (which can never be scanned) is replaced by the live one.
+  useEffect(() => {
+    if (!pairing) return
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const res = await fetch('/api/dsh-wechat-bridge/status')
+          if (!res.ok) return
+          const data = (await res.json()) as Status
+          if (data.ok !== true) return
+          if (data.qr && data.qr !== qr) setQr(data.qr)
+        } catch { /* keep last */ }
+      })()
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [pairing, qr])
 
   /** POST a pairing-management action and re-poll the status afterwards. */
   const action = async (path: string, body?: Record<string, unknown>): Promise<void> => {
@@ -454,7 +477,7 @@ function WechatBridgePanel(props: { t: (key: string) => string }) {
     h('div', { style: css.card },
       h('div', { style: css.row },
         h('h4', { style: css.title }, t('pair')),
-        h('button', { style: css.button, onClick: () => void pair(), disabled: pairing }, pairing ? t('pairing') : t('pair')),
+        h('button', { style: css.button, onClick: () => void pair(), disabled: busy }, pairing ? t('pairing') : t('pair')),
       ),
       svgDataUrl ? h('img', { src: svgDataUrl, style: css.qr, alt: 'WeChat QR' }) : null,
       h('p', { style: css.muted }, t('pairHint')),

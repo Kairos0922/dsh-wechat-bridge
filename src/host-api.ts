@@ -192,6 +192,11 @@ export function registerHostApi(ctx: Context, gateway: WechatGateway, node: Wech
           status: gateway.status,
           pairingMessage: gateway.pairingMessage,
           needVerifyCode: gateway.needVerifyCode,
+          // L3: the gateway updates pairingQr on every QR refresh (expired /
+          // verify_code_blocked reissues a fresh code). Exposing the CURRENT
+          // svg lets the panel auto-refresh the displayed QR instead of
+          // showing a stale one that can never be scanned.
+          qr: gateway.pairingQr?.svg ?? null,
           paused: node.isPaused(),
           paired: Boolean(creds?.botToken),
           accountId: creds?.accountId ?? null,
