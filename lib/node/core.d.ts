@@ -160,6 +160,19 @@ export declare class WechatBridgeNode {
     private readonly menus;
     /** Last user prompt per peer (for /retry). */
     private readonly lastUserText;
+    /**
+     * Last "liveness" per peer: any message delivered to the peer or any
+     * inbound from the peer refreshes it. The stall watchdog uses this to tell
+     * a genuinely stuck run (no outbound for minutes) from a long but healthy
+     * one (heartbeats keep flowing).
+     */
+    private readonly lastActivityAt;
+    /** Per-peer throttle for the busy-queue notice (one per 2 min max). */
+    private readonly lastBusyAckAt;
+    /** Per-peer throttle for the stall notice (one per stall window). */
+    private readonly lastStallNoticeAt;
+    /** Stall threshold: no outbound AND no inbound for this long → notice. */
+    static readonly STALL_MS: number;
     private readonly pending;
     private approvalCounter;
     /**
@@ -267,6 +280,13 @@ export declare class WechatBridgeNode {
     activeSession(peerId: string): Session | undefined;
     /** The agent driving the peer's active session, if any. */
     activeAgent(peerId: string): Agent | undefined;
+    /**
+     * Stall watchdog (called every 60s): a peer whose agent is still running
+     * but has had NO delivered outbound and NO inbound for STALL_MS gets an
+     * explicit notice — silence is not feedback (2026-09-08 stuck-run incident:
+     * an OpenRouter 404 retry loop ran for hours with zero notices).
+     */
+    watchdogTick(): void;
     /** Whether this node drives the given agent (its session belongs to a peer). */
     ownsAgent(agent: Agent): boolean;
     /** Public accessor for the status panel: the pairer's auto-allowlisted id. */

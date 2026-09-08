@@ -197,21 +197,20 @@ test('stopTurn: friendly feedback when nothing is running', async () => {
   node.dispose()
 })
 
-test('stale-session (prepare failed): tokenless resend recovers and clears the token', async () => {
+test('stale-session (window exhausted): keeps the token, no tokenless resend', async () => {
   const oldHome = process.env.DSH_HOME
   process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-stale-'))
   try {
-    const sends: Array<{ token: string | undefined; text: string }> = []
+    const sends: Array<{ token?: string; text?: string }> = []
     const ctx = {
       logger: { warn() {} },
       wechat: {
         sendText: async (p: { toUserId: string; text: string; contextToken?: string }) => {
           sends.push({ token: p.contextToken, text: p.text })
-          // First send with the stale token → prepare failed (the 2026-08-18
-          // incident signature); tokenless resend succeeds.
-          return p.contextToken !== undefined
-            ? { ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=prepare failed', retryable: false, failureClass: 'stale-session' }
-            : { ok: true, messageId: 42 }
+          // protocol.md §5: ret=-2 prepare failed = inbound-window quota,
+          // NOT token expiry (tokenless 5/5 fails; the token is refreshed by
+          // the peer's next inbound). OpenClaw/wxclawbot: never destroy it.
+          return { ok: false, ret: -2, errmsg: 'sendMessage ret=-2 errcode=- errmsg=prepare failed', retryable: false, failureClass: 'stale-session' }
         },
       },
     }
@@ -220,35 +219,30 @@ test('stale-session (prepare failed): tokenless resend recovers and clears the t
     node.setPeerContextToken('peer-a@im.wechat', 'tok-stale-123')
     node.enqueueText('peer-a@im.wechat', '任务计划')
     await node.outbox.drain()
-    assert.equal(sends.length, 2, 'one stale-token send + one tokenless resend')
+    assert.equal(sends.length, 2, 'original send + non-silent failure notice')
     assert.equal(sends[0]?.token, 'tok-stale-123')
-    assert.equal(sends[1]?.token, undefined, 'resend carries NO context token')
-    assert.equal(sends[1]?.text, '任务计划')
-    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), null, 'stale token cleared')
+    assert.equal(sends[0]?.text, '任务计划')
+    assert.equal(sends[1]?.text.includes('发送失败'), true, 'failure notice is not silent')
+    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), 'tok-stale-123', 'token is kept for the next inbound')
     node.dispose()
   } finally {
     process.env.DSH_HOME = oldHome
   }
 })
 
-test('stale-session recovery does not clear a concurrently refreshed token', async () => {
+test('stale-session: a token refreshed by a concurrent inbound survives', async () => {
   const oldHome = process.env.DSH_HOME
   process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dwb-cmpdel-'))
   try {
-    const sends: Array<{ token: string | undefined }> = []
     let node: WechatBridgeNode
     const ctx = {
       logger: { warn() {} },
       wechat: {
         sendText: async (p: { contextToken?: string }) => {
-          sends.push({ token: p.contextToken })
-          if (p.contextToken !== undefined) {
-            // An inbound message refreshes the token WHILE the stale-token
-            // send is in flight — compare-and-delete must not kill it.
-            node.setPeerContextToken('peer-a@im.wechat', 'tok-fresh')
-            return { ok: false, ret: -2, errmsg: 'prepare failed', retryable: false, failureClass: 'stale-session' }
-          }
-          return { ok: true, messageId: 1 }
+          // An inbound message refreshes the token WHILE the stale-token
+          // send is in flight — the dispatch must not overwrite it.
+          node.setPeerContextToken('peer-a@im.wechat', 'tok-fresh')
+          return { ok: false, ret: -2, errmsg: 'prepare failed', retryable: false, failureClass: 'stale-session' }
         },
       },
     }
@@ -257,11 +251,7 @@ test('stale-session recovery does not clear a concurrently refreshed token', asy
     node.setPeerContextToken('peer-a@im.wechat', 'tok-old')
     node.enqueueText('peer-a@im.wechat', 'hi')
     await node.outbox.drain()
-    assert.equal(sends.length, 2)
-    assert.equal(sends[0]?.token, 'tok-old', 'sends the token that was stale')
-    assert.equal(sends[1]?.token, undefined, 'tokenless resend still fires')
-    // Compare-and-delete must NOT have removed the refreshed token.
-    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), 'tok-fresh')
+    assert.equal(node.getPeerContextToken('peer-a@im.wechat'), 'tok-fresh', 'concurrently refreshed token survives')
     node.dispose()
   } finally {
     process.env.DSH_HOME = oldHome
@@ -672,3 +662,63 @@ test('inbound tasks run strictly serial per sender, parallel across senders', ()
     assert.ok(order.indexOf('a1-end') < order.indexOf('a2-start'), 'same sender serialized')
     node.dispose()
   }))
+
+test('busy session acks a queued followup (one per 2 min)', async () => {
+  const agent = { session: { id: 'wechat-run-busy' }, status: 'running', cancel: () => {}, followup: () => {} }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents: { get: () => agent, create: async () => ({ agent, dispose: async () => {} }) },
+    sessions: { get: () => ({ id: 'wechat-run-busy' }) },
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', 'wechat-run-busy' as never)
+  const sent: string[] = []
+  node.enqueueText = ((_p: string, text: string) => { sent.push(text) }) as never
+  await node.handleText('a@im.wechat', '在吗')
+  await node.handleText('a@im.wechat', '还在吗')
+  const acks = sent.filter((t) => t.includes('上一条任务还在处理中'))
+  assert.equal(acks.length, 1, 'one busy ack within the throttle window')
+  node.dispose()
+})
+
+test('stall watchdog notices a stuck run once per window', async () => {
+  const agent = { session: { id: 'wechat-run-stall' }, status: 'running', cancel: () => {}, followup: () => {} }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents: { get: () => agent, create: async () => ({ agent, dispose: async () => {} }) },
+    sessions: { get: () => ({ id: 'wechat-run-stall' }) },
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', 'wechat-run-stall' as never)
+  const sent: string[] = []
+  node.enqueueText = ((_p: string, text: string) => { sent.push(text) }) as never
+  // Liveness anchor 6 minutes ago: the run looks stuck.
+  ;(node as unknown as { lastActivityAt: Map<string, number> }).lastActivityAt.set('a@im.wechat', Date.now() - 6 * 60_000)
+  node.watchdogTick()
+  node.watchdogTick()
+  const notices = sent.filter((t) => t.includes('没有动静'))
+  assert.equal(notices.length, 1, 'one stall notice per window')
+  assert.ok(notices[0]?.includes('/stop'), 'notice offers /stop')
+  node.dispose()
+})
+
+test('stall watchdog stays silent while the run still delivers', async () => {
+  const agent = { session: { id: 'wechat-run-healthy' }, status: 'running', cancel: () => {}, followup: () => {} }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents: { get: () => agent, create: async () => ({ agent, dispose: async () => {} }) },
+    sessions: { get: () => ({ id: 'wechat-run-healthy' }) },
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', 'wechat-run-healthy' as never)
+  const sent: string[] = []
+  node.enqueueText = ((_p: string, text: string) => { sent.push(text) }) as never
+  // Fresh liveness anchor: no notice.
+  ;(node as unknown as { lastActivityAt: Map<string, number> }).lastActivityAt.set('a@im.wechat', Date.now() - 10_000)
+  node.watchdogTick()
+  assert.equal(sent.filter((t) => t.includes('没有动静')).length, 0)
+  node.dispose()
+})

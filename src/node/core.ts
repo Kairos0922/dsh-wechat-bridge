@@ -193,6 +193,19 @@ export class WechatBridgeNode {
   private readonly menus = new Map<string, PendingMenu>()
   /** Last user prompt per peer (for /retry). */
   private readonly lastUserText = new Map<string, string>()
+  /**
+   * Last "liveness" per peer: any message delivered to the peer or any
+   * inbound from the peer refreshes it. The stall watchdog uses this to tell
+   * a genuinely stuck run (no outbound for minutes) from a long but healthy
+   * one (heartbeats keep flowing).
+   */
+  private readonly lastActivityAt = new Map<string, number>()
+  /** Per-peer throttle for the busy-queue notice (one per 2 min max). */
+  private readonly lastBusyAckAt = new Map<string, number>()
+  /** Per-peer throttle for the stall notice (one per stall window). */
+  private readonly lastStallNoticeAt = new Map<string, number>()
+  /** Stall threshold: no outbound AND no inbound for this long → notice. */
+  static readonly STALL_MS = 5 * 60_000
   private readonly pending = new Map<number, PendingApproval>()
   private approvalCounter = 0
   /**
@@ -343,6 +356,12 @@ export class WechatBridgeNode {
       this.peerContextTokens.set(peerId, token)
     }
     this.disposers.push(attachSessionOutbound(this))
+    // Stall watchdog: a running turn that goes silent (no outbound delivered
+    // and no inbound for STALL_MS) is almost certainly stuck (LLM retry loop,
+    // dead provider) — the peer gets a visible notice instead of silence.
+    const watchdog = setInterval(() => this.watchdogTick(), 60_000)
+    watchdog.unref?.()
+    this.disposers.push(() => clearInterval(watchdog))
     this.disposers.push(attachApprovalBridge(this))
     this.disposers.push(attachMediaRetention(this))
     this.disposers.push(
@@ -467,30 +486,18 @@ export class WechatBridgeNode {
     let token = this.peerContextTokens.get(to)
     const runId = this.peerRunIds.get(to)
     const result = await this.sendWithEntry(entry, target, token, runId)
+    // Any delivered message is liveness: the stall watchdog anchors on this.
+    if (result.ok) this.lastActivityAt.set(to, Date.now())
 
-    // Stale-session recovery: the server reported the context_token expired
-    // ("prepare failed" / "unknown error", protocol.md §5). iLink accepts
-    // tokenless sends as a degraded fallback (chatnode/hermes port). Delete
-    // the stale token compare-and-delete so a concurrently refreshed token
-    // survives, then retry ONCE without a token — this extra attempt does not
-    // consume the outbox retry budget, and any later outbox retries are
-    // naturally tokenless because the cache entry is gone.
+    // stale-session（协议.md §5：ret=-2 prepare failed = 用户入站窗口配额
+    // 耗尽，不是 token 失效）。**不销毁 token、不 tokenless 重试**——
+    // porting-notes 实测 tokenless 5/5 失败；删 token 会让后续出站永久
+    // 失效。恢复唯一路径 = 用户下一条入站（新 token + 新窗口），must
+    // 条目经恢复重推队列自动补发（对齐 openclaw/wxclawbot：永不销毁
+    // context token，宁可等待窗口也不降级）。
     if (result.failureClass === 'stale-session' && token) {
-      if (this.peerContextTokens.get(to) === token) {
-        this.setPeerContextToken(to, null)
-        debugLogEvent({ event: 'send-token-invalidated', peer: to, token: `…${token.slice(-12)}` })
-      }
-      // A short pause so the tokenless resend is not a same-instant burst.
-      await new Promise((r) => setTimeout(r, 1_000))
-      const retried = await this.sendWithEntry(entry, target, undefined, runId)
-      debugLogEvent({
-        event: 'send-tokenless-retry',
-        peer: to,
-        ok: retried.ok,
-        failureClass: retried.failureClass ?? null,
-        errmsg: retried.errmsg?.slice(0, 120) ?? null,
-      })
-      return retried
+      debugLogEvent({ event: 'send-window-exhausted', peer: to, token: `…${token.slice(-12)}` })
+      return result
     }
     return result
   }
@@ -743,6 +750,32 @@ export class WechatBridgeNode {
     const session = this.activeSession(peerId)
     if (!session) return undefined
     return this.ctx.agents.get(session.id)
+  }
+
+  /**
+   * Stall watchdog (called every 60s): a peer whose agent is still running
+   * but has had NO delivered outbound and NO inbound for STALL_MS gets an
+   * explicit notice — silence is not feedback (2026-09-08 stuck-run incident:
+   * an OpenRouter 404 retry loop ran for hours with zero notices).
+   */
+  watchdogTick(): void {
+    for (const peerId of [...this.peerSessions.keys()]) {
+      const agent = this.activeAgent(peerId)
+      if (agent?.status !== 'running') continue
+      const last = this.lastActivityAt.get(peerId) ?? 0
+      const stalledMs = Date.now() - last
+      if (stalledMs < WechatBridgeNode.STALL_MS) continue
+      const lastNotice = this.lastStallNoticeAt.get(peerId) ?? 0
+      if (Date.now() - lastNotice < WechatBridgeNode.STALL_MS) continue
+      this.lastStallNoticeAt.set(peerId, Date.now())
+      const mins = Math.round(stalledMs / 60_000)
+      this.enqueueText(
+        peerId,
+        `⚠️ 任务已运行 ${mins} 分钟没有动静（可能是模型通道异常）。回复 /stop 中断、/retry 重跑，或继续等待。`,
+        { kind: 'system', resendOnRecovery: true },
+      )
+      debugLogEvent({ event: 'stall-notice', peer: peerId, stalledMs })
+    }
   }
 
   /** Whether this node drives the given agent (its session belongs to a peer). */
@@ -1376,6 +1409,19 @@ export class WechatBridgeNode {
     }
     this.rememberUserText(peerId, unescaped)
     debugLog({ event: 'followup', session: this.activeSession(peerId)?.id ?? null })
+    // Any user inbound proves the channel is alive; refresh the stall anchor
+    // and give an immediate ack when the session is busy with a prior turn
+    // (IM-native silence is not a notice — the peer must know the message was
+    // queued, see the 2026-09-08 stuck-run incident).
+    this.lastActivityAt.set(peerId, Date.now())
+    if (agent.status === 'running' && Date.now() - (this.lastBusyAckAt.get(peerId) ?? 0) > 120_000) {
+      this.lastBusyAckAt.set(peerId, Date.now())
+      this.enqueueText(
+        peerId,
+        '⏳ 上一条任务还在处理中，你的消息已排队；回复 /stop 可中断，/retry 可重跑。',
+        { kind: 'system' },
+      )
+    }
     // The agent loop queues follow-ups while a turn is running and processes
     // them afterwards — no queue notice needed (IM-native silence; the
     // thinking heartbeat already signals busy). Messages are never dropped.

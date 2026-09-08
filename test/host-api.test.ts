@@ -87,6 +87,8 @@ interface FakeNode {
   confirmPendingTrust(): Promise<boolean>
   rejectPendingTrust(): boolean
   revokePairedUser(userId: string): Promise<boolean>
+  isAllowed(userId: string): Promise<boolean>
+  enqueueText(peerId: string, text: string, opts: Record<string, unknown>): void
   isPaused(): boolean
   setPaused(paused: boolean): void
   isSessionWechatEnabled(sessionId: string): boolean
@@ -115,6 +117,7 @@ function mount(opts: {
     confirmPairing: async () => false,
     rejectPairing: () => false,
     submitVerifyCode: () => false,
+    sendText: async () => ({ ok: true, messageId: 1 }),
     healthSnapshot: () => ({ status: 'polling', reason: 'healthy', issues: [], pollFailures: 0, lastInboundAt: null, lastOutboundAt: null, uptimeMs: 0 }),
     ...opts.gateway,
   }
@@ -129,6 +132,8 @@ function mount(opts: {
     confirmPendingTrust: async () => false,
     rejectPendingTrust: () => false,
     revokePairedUser: async () => false,
+    isAllowed: async () => true,
+    enqueueText: () => {},
     isPaused: () => false,
     setPaused: () => {},
     isSessionWechatEnabled: () => false,
@@ -270,4 +275,60 @@ test('sessions endpoint emits the same contract shape', async () => {
   for (const key of ['id', 'label', 'status', 'lastActivityAt', 'enabled'] as const) {
     assert.ok(key in body.sessions[0]!, `session contract field missing: ${key}`)
   }
+})
+
+// ------------------------------------------------- send endpoint (channel)
+
+test('send enqueues a must entry with recovery resend for a trusted peer', async () => {
+  const seen: Array<{ peerId: string; text: string; opts: Record<string, unknown> }> = []
+  const routes = mount({
+    node: {
+      isAllowed: async (id: string) => id === 'kairos@im.wechat',
+      enqueueText: (peerId: string, text: string, opts: Record<string, unknown>) => seen.push({ peerId, text, opts }),
+    },
+  })
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/send')!(
+    fakeReq({ host: '127.0.0.1:3080' }, 'POST', JSON.stringify({ toUserId: 'kairos@im.wechat', text: 'hello' })), res)
+  assert.equal(result().code, 200)
+  assert.deepEqual(result().body, { ok: true, queued: true })
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].peerId, 'kairos@im.wechat')
+  assert.equal(seen[0].text, 'hello')
+  assert.equal(seen[0].opts.resendOnRecovery, true)
+  assert.equal(seen[0].opts.priority, 5) // OUTBOX_PRIORITY.must
+})
+
+test('send rejects an untrusted toUserId', async () => {
+  let enqueued = false
+  const routes = mount({
+    node: {
+      isAllowed: async () => false,
+      enqueueText: () => { enqueued = true },
+    },
+  })
+  const { res, result } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/send')!(
+    fakeReq({ host: '127.0.0.1:3080' }, 'POST', JSON.stringify({ toUserId: 'stranger@im.wechat', text: 'hi' })), res)
+  assert.equal(result().code, 403)
+  assert.equal(enqueued, false)
+})
+
+test('send requires toUserId and non-empty text', async () => {
+  const routes = mount()
+  for (const body of [JSON.stringify({ text: 'x' }), JSON.stringify({ toUserId: 'u' }), JSON.stringify({ toUserId: 'u', text: '   ' })]) {
+    const { res, result } = fakeRes()
+    await routes.get('/api/dsh-wechat-bridge/send')!(fakeReq({ host: '127.0.0.1:3080' }, 'POST', body), res)
+    assert.equal(result().code, 400, body)
+  }
+})
+
+test('send answers 405 on non-POST and 403 on untrusted host', async () => {
+  const routes = mount()
+  const { res: r1, result: x1 } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/send')!(fakeReq({ host: '127.0.0.1:3080' }, 'GET'), r1)
+  assert.equal(x1().code, 405)
+  const { res: r2, result: x2 } = fakeRes()
+  await routes.get('/api/dsh-wechat-bridge/send')!(fakeReq({ host: 'evil.example.com' }, 'POST', JSON.stringify({ toUserId: 'u', text: 'x' })), r2)
+  assert.equal(x2().code, 403)
 })
