@@ -12,6 +12,7 @@
 
 import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { lastSessionEvent, reversedSessionEvents, sessionEvents } from '../session-events.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { listModes, type ModeInfo } from './presets.ts'
 import { latestContextInput, sendTextToPeer, textOfAssistantMessage } from './outbound.ts'
@@ -80,7 +81,7 @@ function timeAgo(epochMs: number): string {
 
 /** The active session's first user prompt, for list labels. */
 export function sessionLabel(session: Session): string {
-  for (const event of session.events) {
+  for (const event of sessionEvents(session)) {
     if (event.type === 'user/message') {
       const blocks = event.data.content as unknown as Array<{ type: string; text?: string }>
       const text = blocks
@@ -199,7 +200,7 @@ export const COMMANDS: CommandSpec[] = [
         const marker = session.id === activeId ? ' ▶' : ''
         const input = latestContextInput(session)
         const ctx = input > 0 ? ` · 上下文 ${input >= 1000 ? `${(input / 1000).toFixed(1)}k` : input}` : ''
-        const last = session.events[session.events.length - 1]
+        const last = lastSessionEvent(session)
         const ago = last ? timeAgo(last.time) : ''
         return `${i + 1}. ${sessionLabel(session)}${ctx}${ago ? ` · ${ago}` : ''}${marker}`
       })
@@ -244,7 +245,7 @@ export const COMMANDS: CommandSpec[] = [
         return
       }
       const agent = node.activeAgent(peerId)
-      const lastTurn = [...session.events].reverse().find((e) => e.type === 'turn/end')
+      const lastTurn = reversedSessionEvents(session).find((e) => e.type === 'turn/end')
       const reason = lastTurn ? describeTurnEnd(lastTurn.data.reason) : '尚未运行'
       const prefs = node.state.getPrefs(peerId)
       const modelLine = prefs.provider && prefs.model ? `${prefs.provider}/${prefs.model}` : '跟随 DSH 默认'
@@ -464,7 +465,7 @@ function describeTurnEnd(reason: { kind: string }): string {
 /** Latest turn's token usage from assistant/message events, when reported. */
 function tokenUsageSummary(session: Session): string {
   let last: { input?: number; output?: number; reasoning?: number } | null = null
-  for (const event of session.events) {
+  for (const event of sessionEvents(session)) {
     if (event.type === 'assistant/message' && event.data.usage) {
       const usage = event.data.usage as unknown as {
         inputTokens?: number
@@ -583,7 +584,7 @@ COMMANDS.push(
         await sendTextToPeer(node, peerId, '❌ 没有活动的会话', { kind: 'system' })
         return
       }
-      const last = [...session.events].reverse().find((e) => e.type === 'assistant/message')
+      const last = reversedSessionEvents(session).find((e) => e.type === 'assistant/message')
       if (!last || last.type !== 'assistant/message') {
         await sendTextToPeer(node, peerId, '❌ 没有可渲染的回复', { kind: 'system' })
         return

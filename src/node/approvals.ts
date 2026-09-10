@@ -16,6 +16,7 @@
  */
 
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import { sessionEvents } from '../session-events.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { sendTextToPeer } from './outbound.ts'
 
@@ -32,7 +33,7 @@ export interface PendingApproval {
 /** Short argument summary from the logged tool call, when callId links one. */
 export function approvalArgsSummary(request: ApprovalRequest): string | null {
   if (!request.callId) return null
-  for (const event of request.agent.session.events) {
+  for (const event of sessionEvents(request.agent.session)) {
     if (event.type === 'tool/call' && event.data.callId === request.callId) {
       const collapsed = event.data.arguments.replace(/\s+/g, ' ').trim()
       return collapsed.length > 160 ? `${collapsed.slice(0, 160)}…` : collapsed

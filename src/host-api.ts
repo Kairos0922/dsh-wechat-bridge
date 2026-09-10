@@ -19,6 +19,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import { lastSessionEvent } from './session-events.ts'
 import type { WechatGateway } from './gateway/index.ts'
 import { listModes } from './node/presets.ts'
 import { listSessions, sessionLabel } from './node/commands.ts'
@@ -76,7 +77,7 @@ function agentStatusLabel(status: string | undefined): string {
 
 /** Build the Web-panel session contract for one DSH session. */
 function buildSessionInfo(node: WechatBridgeNode, session: Session): SessionInfo {
-  const last = session.events[session.events.length - 1]
+  const last = lastSessionEvent(session)
   const agent = (node.ctx as unknown as { agents?: { get(id: string): { status?: string } | undefined } }).agents?.get(session.id)
   return {
     id: session.id,

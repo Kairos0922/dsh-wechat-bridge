@@ -13,7 +13,7 @@ function fakeRequest(callId: string | undefined, events: unknown[]): ApprovalReq
     toolName: 'bash',
     callId,
     reason: 'needs consent',
-    agent: { session: { events } },
+    agent: { session: { snapshotEvents: () => events } },
   } as unknown as ApprovalRequest
 }
 

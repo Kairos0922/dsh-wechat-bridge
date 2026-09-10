@@ -14,7 +14,7 @@
  * @module dsh-wechat-bridge/node/outbound
  */
 
-import type { AssistantMessage } from '@deepseek-ai/dsh-llm'
+import type { AssistantMessage, AssistantStreamRecord } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   ITEM_TOOL_CALL_RESULT,
@@ -22,6 +22,7 @@ import {
   MAX_MESSAGE_CHARS,
 } from '../gateway/types.ts'
 import type { WechatBridgeNode } from './core.ts'
+import { reversedSessionEvents } from '../session-events.ts'
 import { renderForWechat } from './markdown.ts'
 import { writeExportFile } from './exports.ts'
 import { debugLog, debugLogEvent } from '../debug-log.ts'
@@ -394,12 +395,26 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       return
     }
 
-    if (event.type === 'assistant/chunk') {
-      if (event.data.chunk.type === 'reasoning-delta') {
-        state.reasoningChars += event.data.chunk.text.length
-        state.lastReasoning = (state.lastReasoning + event.data.chunk.text).slice(-60)
+    // Reasoning accounting for the liveness digest. 0.1.5 packs the model
+    // stream into the assistant events (`stream`: compact delta runs) instead
+    // of emitting the legacy `assistant/chunk` event, so count the packed
+    // `reasoning-chunks` runs and any surviving raw reasoning chunk records.
+    if (event.type === 'assistant/message' || event.type === 'assistant/attempt') {
+      // Defensive read: the stream is optional at runtime (migrated logs and
+      // test doubles omit it), and an absent field must degrade, never throw.
+      const stream = (event.data as { stream?: readonly AssistantStreamRecord[] }).stream
+      for (const record of Array.isArray(stream) ? stream : []) {
+        if (record.type === 'reasoning-chunks') {
+          const text = record.texts.join('')
+          state.reasoningChars += text.length
+          state.lastReasoning = (state.lastReasoning + text).slice(-60)
+        } else if (record.type === 'chunk' && record.chunk.type === 'reasoning-delta') {
+          state.reasoningChars += record.chunk.text.length
+          state.lastReasoning = (state.lastReasoning + record.chunk.text).slice(-60)
+        }
       }
-      return
+      // An attempt that committed no surface message has nothing else to digest.
+      if (event.type === 'assistant/attempt') return
     }
 
     if (event.type === 'tool/call') {
@@ -439,24 +454,10 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       return
     }
 
-    if (event.type === 'todo/write') {
-      if (group) return
-      // Same quota guard as heartbeats: todo snapshots are nice-to-have, the
-      // window budget belongs to the final answer.
-      if (node.sessionWindowRemaining(peer) <= HEARTBEAT_QUOTA_RESERVE) return
-      const hash = JSON.stringify(event.data.todos)
-      if (hash !== state.todoHash) {
-        state.todoHash = hash
-        const lines = event.data.todos.map((todo) => {
-          const mark = todo.status === 'completed' ? '✅' : todo.status === 'in_progress' ? '🔄' : '⭕'
-          return `${mark} ${todo.content}`
-        })
-        if (lines.length > 0) {
-          node.enqueueText(peer, `📋 任务计划\n${lines.join('\n')}`, { kind: 'progress', coalesceKey: `todo:${session.id}` })
-        }
-      }
-      return
-    }
+    // Legacy hosts emitted a `todo/write` session event for plan snapshots.
+    // 0.1.5 has no such event — the todo tool now keeps its list in tool-private
+    // result `meta` — so the plan digest is retired; the tool call itself still
+    // shows up as a progress card when its prefix is configured.
 
     if (event.type === 'assistant/message') {
       // Product decision (2026-08-18): intermediate assistant texts (tool
@@ -486,9 +487,16 @@ export function attachSessionOutbound(node: WechatBridgeNode): () => void {
       }
       // Per-turn context usage: keep the user aware of how much of the
       // session window is consumed and when to start a fresh session.
-      void buildContextUsageLine(session, node).then((line) => {
-        if (line) node.enqueueText(peer, line, { kind: 'system' })
-      })
+      // The floating promise MUST carry its own catch: an unhandled rejection
+      // here is fatal to the host process (fail-loud), and it would take the
+      // freshly enqueued final answer down with it (2026-09-10 incident).
+      void buildContextUsageLine(session, node)
+        .then((line) => {
+          if (line) node.enqueueText(peer, line, { kind: 'system' })
+        })
+        .catch((err) => {
+          debugLogEvent({ event: 'context-line-failed', session: session.id, error: String(err).slice(0, 200) })
+        })
       if (reason.kind === 'error') {
         node.enqueueText(peer, `❌ 处理出错: ${summarizeError(reason.error)}\n回复 /retry 重试上一次任务。`, { kind: 'system', priority: OUTBOX_PRIORITY.must, resendOnRecovery: true })
       } else if (reason.kind === 'aborted') {
@@ -555,7 +563,7 @@ function summarizeError(error: unknown): string {
  */
 /** Latest reported input tokens ≈ current context size (or 0). */
 export function latestContextInput(session: Session): number {
-  for (const event of [...session.events].reverse()) {
+  for (const event of reversedSessionEvents(session)) {
     if (event.type === 'assistant/message' && event.data.usage) {
       return event.data.usage.inputTokens
     }

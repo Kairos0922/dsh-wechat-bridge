@@ -14,7 +14,7 @@ import { buildCardHtml, estimateHeight } from '../src/node/card.ts'
 test('buildTranscript renders user/assistant/tool entries', () => {
   const transcript = buildTranscript({
     id: 'wechat-1',
-    events: [
+    snapshotEvents: () => [
       { type: 'user/message', data: { content: [{ type: 'text', text: '你好' }] } },
       { type: 'tool/call', data: { name: 'bash' } },
       { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '**回复**' }] } } },

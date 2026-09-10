@@ -63,7 +63,7 @@ test('isProgressTool: non-empty list cards only matching prefixes', () => {
 
 test('buildContextUsageLine: reports tokens vs window and escalates near the limit', async () => {
   const usageEvent = (input: number) => ({ type: 'assistant/message', data: { message: {}, usage: { inputTokens: input, outputTokens: 10 } } })
-  const session = { id: 'wechat-x', events: [usageEvent(12000)] }
+  const session = { id: 'wechat-x', snapshotEvents: () => [usageEvent(12000)] }
   const ctx = {
     get: () => ({
       listModels: async () => [{ id: 'deepseek-chat', contextWindow: 32000 }],
@@ -78,10 +78,13 @@ test('buildContextUsageLine: reports tokens vs window and escalates near the lim
   }
   const line = await buildContextUsageLine(session as never, node as never)
   assert.match(line ?? '', /12.0k \/ 32.0k（38%）/)
-  const hot = await buildContextUsageLine({ id: 'wechat-y', events: [usageEvent(26000)] } as never, node as never)
+  const hot = await buildContextUsageLine({ id: 'wechat-y', snapshotEvents: () => [usageEvent(26000)] } as never, node as never)
   assert.match(hot ?? '', /81%/)
   assert.match(hot ?? '', /建议 \/new/)
-  const none = await buildContextUsageLine({ id: 'wechat-z', events: [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }] } as never, node as never)
+  const none = await buildContextUsageLine(
+    { id: 'wechat-z', snapshotEvents: () => [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }] } as never,
+    node as never,
+  )
   assert.equal(none, null)
 })
 
@@ -92,6 +95,13 @@ test('buildContextUsageLine: reports tokens vs window and escalates near the lim
 
 import { WechatBridgeNode } from '../src/node/core.ts'
 import { attachSessionOutbound } from '../src/node/outbound.ts'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+// A digest harness builds a real node, which persists state: keep every test
+// away from the live bridge state under ~/.dsh/storages/.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-wechat-bridge-test-'))
 
 const DIGEST_CONFIG = {
   allowFrom: ['peer-a@im.wechat'],
@@ -107,6 +117,9 @@ const DIGEST_CONFIG = {
   menuTimeoutSec: 60,
   markdownMode: 'passthrough',
   progressToolPrefixes: [],
+  // The reasoning-char count rides the long-task completion notice.
+  notifyOnComplete: true,
+  notifyMinTurnSec: 0,
 } as never
 
 function digestHarness() {
@@ -128,8 +141,8 @@ function digestHarness() {
     sent.push({ text, kind: opts.kind ?? 'text' })
   }) as never
   const disposer = attachSessionOutbound(node)
-  const session = { id: 'wechat-msx-test-1', events: [] }
-  return { node, sent, fire: (e: unknown) => handler.current?.(session as never, e), dispose: () => { disposer(); node.dispose() } }
+  const session = { id: 'wechat-msx-test-1', snapshotEvents: () => [] }
+  return { node, session, sent, fire: (e: unknown) => handler.current?.(session as never, e), dispose: () => { disposer(); node.dispose() } }
 }
 
 test('intermediate assistant texts are NOT pushed; the final one is flushed at turn/end', async () => {
@@ -159,5 +172,48 @@ test('aborted turns do not flush the cached text (stop affordance only)', async 
   const texts = h.sent.map((s) => s.text)
   assert.equal(texts.includes('部分输出'), false, 'aborted partial output is not pushed')
   assert.ok(texts.some((t) => t.includes('已停止')), 'stop notice still sent')
+  h.dispose()
+})
+
+/**
+ * 2026-09-10 incident: the session log accessor vanished in the 0.1.5 host
+ * upgrade, the read produced `undefined`, and `[...undefined]` threw on the
+ * turn/end path. The floating promise rejected, DSH's fail-loud handler exited
+ * the process, and the final answer died in the still-unflushed outbox. The
+ * digest must survive a broken accessor.
+ */
+test('turn/end digests a session whose log accessor throws (0.1.5 host API)', () => {
+  const h = digestHarness()
+  h.node.setActiveSession('peer-a@im.wechat', 'wechat-msx-test-1' as never)
+  const session = h.session as unknown as { snapshotEvents: () => unknown[] }
+  // The exact incident shape: the log accessor throws. It must be swallowed and
+  // the floating context-line promise must carry its own catch — an unhandled
+  // rejection here is fatal to the host process (node:test fails the run on one).
+  session.snapshotEvents = () => {
+    throw new TypeError('session.events is not iterable')
+  }
+  const am = (text: string) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } })
+  h.fire({ type: 'turn/start', data: { turn: 1 } })
+  h.fire(am('最终答案：快照会话也能送达'))
+  h.fire({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  const texts = h.sent.filter((s) => s.kind === 'text').map((s) => s.text)
+  assert.ok(texts.some((t) => t.includes('最终答案：快照会话也能送达')), 'final answer still flushes')
+  return new Promise((resolve) => setImmediate(resolve)).then(() => h.dispose())
+})
+
+test('reasoning accounting reads the packed stream of assistant events', () => {
+  const h = digestHarness()
+  h.node.setActiveSession('peer-a@im.wechat', 'wechat-msx-test-1' as never)
+  h.fire({ type: 'turn/start', data: { turn: 1 } })
+  h.fire({
+    type: 'assistant/message',
+    data: {
+      message: { content: [{ type: 'text', text: '答案' }] },
+      stream: [{ type: 'reasoning-chunks', time0: 1, index: 0, dt: [1, 1], texts: ['思考', '过程'] }],
+    },
+  })
+  h.fire({ type: 'turn/end', data: { reason: { kind: 'completed' } } })
+  const completion = h.sent.map((s) => s.text).find((t) => t.includes('任务完成')) ?? ''
+  assert.match(completion, /思考 4 字/, 'packed reasoning runs are counted')
   h.dispose()
 })

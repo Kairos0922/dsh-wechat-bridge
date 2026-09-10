@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { sessionEvents } from '../session-events.ts'
 import type { WechatBridgeNode } from './core.ts'
 import { defaultMediaDir } from './inbound.ts'
 
@@ -44,7 +45,7 @@ export function writeExportFile(
 /** Render a full session transcript as readable Markdown. */
 export function buildTranscript(session: Session): string {
   const lines: string[] = [`# 会话 ${session.id}`, '']
-  for (const event of session.events) {
+  for (const event of sessionEvents(session)) {
     if (event.type === 'user/message') {
       const text = (event.data.content as unknown as Array<{ type: string; text?: string }>)
         .filter((block) => block.type === 'text')

@@ -88,6 +88,13 @@ export interface OutboxOptions {
   onPause?: (until: number, reason: 'rate-limit' | 'session-expired') => void
   onDrop?: (outboxEntry: OutboxEntry, reason: 'coalesced' | 'disposed' | 'failed' | 'quota' | 'uncertain', result?: SendResult) => void
   /**
+   * Fatal-safety hook: the pump runs as a floating promise, so a throw from a
+   * consumer callback (onDrop) or from a custom sleep seam must not reject it —
+   * an unhandled rejection is fatal to the host process (DSH fail-loud), and it
+   * would take every still-queued message down with it.
+   */
+  onError?: (error: unknown) => void
+  /**
    * Sliding-window send budget: at most `maxPerWindow` sends in any
    * `windowMs` span. Extra entries wait in the queue (never dropped) until
    * the window rolls. The channel's server-side quota is NOT public — the
@@ -111,6 +118,7 @@ export class Outbox {
   private readonly opts: Required<Pick<OutboxOptions, 'minIntervalMs' | 'backoffSecs' | 'sessionExpiredPauseMs' | 'send' | 'now' | 'sleep'>>
   private readonly onPause?: OutboxOptions['onPause']
   private readonly onDrop?: OutboxOptions['onDrop']
+  private readonly onError?: OutboxOptions['onError']
   private readonly budget?: { windowMs: number; maxPerWindow: number }
   private readonly sessionWindowMax: number
   /** Successful sends per peer since the peer's last inbound (session window). */
@@ -144,6 +152,7 @@ export class Outbox {
     }
     this.onPause = opts.onPause
     this.onDrop = opts.onDrop
+    this.onError = opts.onError
     this.budget = opts.budget
     this.sessionWindowMax = opts.sessionWindowMax ?? 0
   }
@@ -296,6 +305,10 @@ export class Outbox {
           if (this.pumping) continue
         }
       }
+    } catch (err) {
+      // Never let the pump's floating promise reject: an unhandled rejection
+      // is fatal to the host process, and the queue would die with it.
+      this.onError?.(err)
     } finally {
       this.pumping = false
     }

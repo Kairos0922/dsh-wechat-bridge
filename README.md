@@ -27,6 +27,12 @@
 dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 ```
 
+> **宿主版本**：只支持 DSH `0.1.5-rc.1`（`Session.snapshotEvents()`、打包的 `assistant/message.stream`），
+> **不提供旧宿主兼容路径**。会话日志读取统一走 `src/session-events.ts`：只读受支持的 `snapshotEvents()`，
+> API 缺失或抛错时记一次 `session-events-api-drift` 诊断并退化为空日志，**绝不抛错**
+> （2026-09-10 事故：静默 `undefined` 让插件在 turn/end 抛错 → 未处理 rejection → 宿主 `exit(1)`，已入队答复丢失）。
+> 升级宿主时请同步升级本插件依赖并重新 `pnpm verify`。
+
 > 若你的 profile 不叫 `web`，把 `--profile web` 换成你的 profile 名。
 
 **第 2 步：扫码配对**——打开 DSH Web 界面 → 设置面板 → 插件 → 微信桥 → 点击「扫码配对」，用你的微信扫码确认。

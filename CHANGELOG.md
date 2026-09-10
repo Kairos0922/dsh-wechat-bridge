@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+### 修复（2026-09-10，宿主 0.1.5 API 对齐）
+
+事故：微信第一轮结束后，第二轮消息触发 `dsh web` 进程反复退出——回复永远停在
+「✅ 已创建新会话…开始处理…」，且第二轮被新建成了默认模式会话。
+
+- **会话日志读取统一走单一访问器**（根因）：DSH 0.1.5 移除了 `Session.events`
+  （改为 `snapshotEvents()`），插件按旧类型编译，运行时该属性为 `undefined`，
+  `[...undefined]` 直接抛错。9 处读取（outbound/commands/exports/approvals/host-api）
+  全部收敛到 `src/session-events.ts`：只读受支持的 `snapshotEvents()`，**不保留旧宿主
+  兼容路径**；API 缺失或抛错时记一次 `session-events-api-drift` 诊断并退化为空日志，
+  永不抛出——静默 `undefined` 正是本次事故失明的原因。
+- **修复致命崩溃**：turn/end 的上下文用量行是浮动 promise 且没有 `.catch`，访问器
+  抛错产生未处理 rejection，被 DSH 的 fail-loud 策略当作致命错误 `exit(1)`；已入队
+  但尚未发送的最终答复随进程消失（内存 outbox），微信侧表现为「一直卡住」。现补
+  `.catch`（记 `context-line-failed`），并给 outbox 泵加 `onError` 兜底。
+- **修复重启后串会话**：重启后内存 session store 为空，`activeSession()` 拿不到
+  绑定会话；而孤儿认领路径**刻意跳过有主会话**（多用户安全），于是走到兜底自动新建
+  默认模式会话。新增 `pickOwnedSession()`：优先恢复该 peer 自己最近的有主会话
+  （持久化 header 排序，`/close` 过的除外）；确实恢复不了时明确提示
+  「上次的会话暂时没能恢复，已新建会话继续」，不再静默改道。
+- **事件名对齐**：`assistant/chunk` 已并入 `assistant/message.stream`（打包 delta
+  记录），思考字数改从 `reasoning-chunks` 记录统计（含 `assistant/attempt`）；
+  `todo/write` 事件在 0.1.5 不存在，任务计划摘要退役（工具调用卡片保留）。
+- **依赖对齐**：`@deepseek-ai/dsh-{session,agent,llm,credentials,user-approval}`
+  `0.1.2-alpha.3` → `0.1.5-rc.1`，`cordis` `^4.0.2`；类型检查因此在构建期拦住
+  宿主 API 漂移（此前插件 node_modules 停在 rc.6，类型与运行时不一致而无人发现）。
+- **测试**：新增回归用例——访问器语义（只认 `snapshotEvents()`，缺失/抛错只记一次漂移诊断）、
+  访问器抛错时 turn/end 不崩（复现事故形状）、重启后恢复有主会话、恢复失败必须公告改道；
+  测试桩统一改用受支持的 API，并以临时 `DSH_HOME` 隔离，不再写生产 `state.json` 与诊断 sink。
+
 ### 新增（2026-09-09，上游对照 openclaw-weixin 2.4.8 后的借鉴批次）
 
 - **OpenClaw 2.0 投递语义对齐**：发送超时标记 `uncertain`，不盲目重发；仅明确未建立连接的网络失败自动重试；下一次入站携带系统备注。入站文本默认 2 秒防抖合并，媒体立即冲刷；轮询网络重连采用 2/5/15/30 秒退避；停机为出站队列提供 4 秒有界排空。

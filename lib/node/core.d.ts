@@ -95,6 +95,13 @@ export interface ResolvedNodeConfig {
 /** Default session id prefix for /new-created sessions. */
 export declare function newSessionId(): SessionId;
 /**
+ * Creation timestamp embedded in a bridge session id
+ * (`wechat-<base36 ms>-<rand>`). Ids are ordered by construction, so this is the
+ * fallback ordering key when the host exposes no header list. Foreign ids
+ * (tests, imports) yield 0 and therefore never win the "newest" comparison.
+ */
+export declare function sessionIdCreatedAt(id: string): number;
+/**
  * Outbox coalesce-key prefix for approval prompts (per-approval key:
  * `approval:<peer>:<number>`). A dropped prompt is marked for re-push
  * (approvalPromptDropped); a re-push of the same approval replaces its
@@ -434,6 +441,17 @@ export declare class WechatBridgeNode {
      *   peer's history to another.
      */
     private adoptable;
+    /**
+     * The peer's most recent OWNED session id (live or merely persisted), for
+     * continuity across a host restart. `pickOrphanSession` cannot serve this:
+     * it adopts only OWNERLESS sessions (the multi-user safety rule), while the
+     * peer's own conversation is by definition owned — which is exactly how a
+     * restart used to fork it into a new default-mode session (2026-09-10).
+     *
+     * Ordering prefers the persisted header `createdAt`; the id's embedded
+     * timestamp is the fallback. Released (/close) sessions are never revived.
+     */
+    private pickOwnedSession;
     private pickOrphanSession;
     nextApprovalNumber(): number;
     registerApproval(number: number, approval: PendingApproval): void;

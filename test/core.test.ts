@@ -14,6 +14,11 @@ import path from 'node:path'
 import { buildWelcomeMessage, WechatBridgeNode } from '../src/node/core.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
+// Never let a test run touch the live bridge state (~/.dsh/storages/…): the node
+// persists peer→session bindings on every setActiveSession, and those bindings
+// are production data the running bridge depends on.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-wechat-bridge-test-'))
+
 const CONFIG = {
   allowFrom: ['peer-a@im.wechat'],
   approvalTimeoutSec: 600,
@@ -151,6 +156,88 @@ test('handleText auto-creates a default session when no agent exists (zero-confi
   node.dispose()
 })
 
+/**
+ * 2026-09-10 incident: after a host restart the peer's persisted binding points
+ * at a session the fresh process has not loaded, so `activeSession()` (which
+ * requires a LIVE Session) misses it — and orphan adoption skips OWNED sessions
+ * by design. The bridge therefore forked a brand-new default-mode session
+ * instead of continuing the existing conversation.
+ */
+test('handleText resumes the peer’s OWNED session after a restart instead of forking', async () => {
+  const resumed: string[] = []
+  const created: string[] = []
+  const owned = 'wechat-mtvczz77-qgt1ai'
+  const live = new Map<string, { session: { id: string }; status: string; followup: () => void }>()
+  const mkAgent = (id: string) => ({ session: { id }, status: 'idle', followup: () => {} })
+  const agents = {
+    create: async (opts: { sessionId: string }) => {
+      created.push(opts.sessionId)
+      live.set(opts.sessionId, mkAgent(opts.sessionId))
+      return { agent: live.get(opts.sessionId), dispose: async () => {} }
+    },
+    resume: async (opts: { resumeSessionId: string }) => {
+      resumed.push(opts.resumeSessionId)
+      live.set(opts.resumeSessionId, mkAgent(opts.resumeSessionId))
+      return { agent: live.get(opts.resumeSessionId), dispose: async () => {} }
+    },
+    get: (id: string) => live.get(id),
+  }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents,
+    // In-memory session store: only what THIS process loaded is live.
+    sessions: { get: (id: string) => (live.has(id) ? { id } : undefined) },
+    agentPresets: undefined,
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', owned as never)
+
+  await node.handleText('a@im.wechat', '第二轮消息')
+
+  assert.deepEqual(resumed, [owned], 'the peer’s own session is resumed')
+  assert.deepEqual(created, [], 'no new session is forked')
+  node.dispose()
+})
+
+test('a failed restore announces the fork instead of silently starting a new session', async () => {
+  const created: string[] = []
+  let live: { session: { id: string }; status: string; followup: () => void } | null = null
+  const agents = {
+    create: async (opts: { sessionId: string }) => {
+      created.push(opts.sessionId)
+      live = { session: { id: opts.sessionId }, status: 'idle', followup: () => {} }
+      return { agent: live, dispose: async () => {} }
+    },
+    resume: async () => {
+      throw new Error('session log unreadable')
+    },
+    get: (id: string) => (live !== null && live.session.id === id ? live : undefined),
+  }
+  const ctx = {
+    logger: { warn() {} },
+    get: () => undefined,
+    agents,
+    sessions: { get: (id: string) => (live !== null && live.session.id === id ? { id } : undefined) },
+    agentPresets: undefined,
+  }
+  const node = new WechatBridgeNode(ctx as never, { ...CONFIG, allowFrom: [], cwd: '/tmp', defaultMode: 'standard' } as never)
+  node.setActiveSession('a@im.wechat', 'wechat-mtvczz77-qgt1ai' as never)
+  const notices: string[] = []
+  node.enqueueText = ((_peer: string, text: string) => {
+    notices.push(text)
+  }) as never
+
+  await node.handleText('a@im.wechat', '你好')
+
+  assert.equal(created.length, 1, 'a session is created as the last resort')
+  assert.ok(
+    notices.some((text) => text.includes('上次的会话暂时没能恢复')),
+    'the fork is announced, never silent',
+  )
+  node.dispose()
+})
+
 test('natural-language stop: only intercepts while a turn is running', async () => {
   let cancelled = 0
   const agent = { session: { id: 'wechat-run-1' }, status: 'running', cancel: () => { cancelled += 1 }, followup: () => {} }
@@ -276,7 +363,7 @@ test('a dropped approval prompt is re-pushed by the inbound retry hook', async (
     node.registerApproval(1, {
       number: 1,
       peerId: 'peer-a@im.wechat',
-      request: { toolName: 'bash', reason: 'needs consent', agent: { session: { events: [] } } },
+      request: { toolName: 'bash', reason: 'needs consent', agent: { session: { snapshotEvents: () => [] } } },
       resolve: () => {},
       timer: setTimeout(() => {}, 600_000),
     } as never)

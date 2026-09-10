@@ -92,7 +92,7 @@ interface FakeNode {
   isPaused(): boolean
   setPaused(paused: boolean): void
   isSessionWechatEnabled(sessionId: string): boolean
-  ctx: { sessions: { list(): Array<{ id: string; header: { createdAt: number }; events: Array<{ time?: number }>; seq?: number }> }; agents: { get(): { status?: string } | undefined } }
+  ctx: { sessions: { list(): Array<{ id: string; header: { createdAt: number }; snapshotEvents(): Array<{ time?: number }>; seq?: number }> }; agents: { get(): { status?: string } | undefined } }
 }
 
 function mount(opts: {
@@ -139,7 +139,7 @@ function mount(opts: {
     isSessionWechatEnabled: () => false,
     ctx: {
       sessions: {
-        list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, events: [{ time: 500 }], seq: 0 }],
+        list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, snapshotEvents: () => [{ time: 500 }], seq: 0 }],
       },
       agents: { get: () => ({ status: 'running' }) },
     },
@@ -252,7 +252,7 @@ test('status carries the sessions contract (label/status/lastActivityAt/enabled)
     node: {
       isSessionWechatEnabled: (id: string) => id === 'wechat-1',
       ctx: {
-        sessions: { list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, events: [{ time: 500 }], seq: 0 }] },
+        sessions: { list: () => [{ id: 'wechat-1', header: { createdAt: 100 }, snapshotEvents: () => [{ time: 500 }], seq: 0 }] },
         agents: { get: () => ({ status: 'running' }) },
       },
     },
