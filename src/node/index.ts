@@ -75,8 +75,7 @@ export interface NodeConfig {
   agentModel?: string
   /** Media storage dir for inbound images (default: $DSH_HOME/storages/dsh-wechat-bridge/media). */
   mediaDir?: string
-  /** Answers longer than this (chars) ship as a file attachment; 0 = disabled
-   *  (default — the backend cannot fetch bot media content yet, probe-verified). */
+  /** Answers longer than this (chars) ship as a file attachment; 0 = disabled. */
   fileThresholdChars?: number
   /** Proactively announce task completion (turns ≥ notifyMinTurnSec only). */
   notifyOnComplete?: boolean
