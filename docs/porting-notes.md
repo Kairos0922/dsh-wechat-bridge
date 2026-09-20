@@ -2,7 +2,7 @@
 
 > 本文记录 dsh-wechat-bridge 与 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin) 的实现对照、适配边界和重要历史结论。**当前协议以 [protocol.md](protocol.md) 为准。**
 >
-> 核心协议实现来源是 Tencent/openclaw-weixin；整体实现方式基于 OpenClaw 及其官方实现，并针对 DSH runtime 做适配。其他 DSH 微信项目不作为本项目的架构来源。
+> 核心协议实现来源是 Tencent/openclaw-weixin；整体实现方式基于 OpenClaw 及其官方实现，并针对 DSH runtime 做适配。其他第三方 DSH 微信项目不作为本项目的架构来源。
 
 ## 1. 来源与边界
 
@@ -112,4 +112,4 @@
 - **Tencent/openclaw-weixin**：本项目协议客户端及部分相关实现的主要上游来源。
 - **OpenClaw**：本项目整体实现方式与协议适配的主要技术参照。
 - **DSH official runtime**：本项目会话、agent、审批、提问及 Web 集成的宿主。
-- 不将 `Jesse-njx/dsh-chatnode-wechat` 描述为本项目架构来源；当前仓库没有必要的代码来源关系，不应在许可证归因中列出。
+- 其他第三方 DSH 微信项目不属于本项目的代码来源或许可证归因范围。
