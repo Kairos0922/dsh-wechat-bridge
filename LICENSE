@@ -2,16 +2,11 @@ MIT License
 
 Copyright (c) 2026 Kairos0922
 
-Portions of the iLink protocol client are derived from Tencent/openclaw-weixin,
-Copyright (C) 2026 Tencent, licensed under the MIT License. In particular:
-- `src/gateway/*` — iLink API client, message/protocol types, CDN media;
-- `src/node/markdown.ts` — behavior-preserving port of
-  `src/messaging/markdown-filter.ts` (StreamingMarkdownFilter);
-- `src/node/outbox.ts` / `src/node/outbound.ts` — the tool-call progress-card
-  pattern (`reply-progress-sender.ts`), typing-ticket caching
-  (`config-cache.ts`) and session-expiry pause semantics (`session-guard.ts`).
-The plugin architecture is informed by Jesse-njx/dsh-chatnode-wechat,
-Copyright (c) 2026 Jesse-njx, licensed under the MIT License.
+Portions of this software are derived from Tencent/openclaw-weixin,
+Copyright (C) 2026 Tencent, licensed under the MIT License. In particular,
+the iLink protocol client, CDN media handling, StreamingMarkdownFilter,
+and selected protocol-alignment patterns are derived from the upstream
+implementation as documented in README.md and docs/porting-notes.md.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
