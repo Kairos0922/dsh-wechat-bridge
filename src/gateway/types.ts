@@ -19,12 +19,8 @@ export const MAX_MESSAGE_CHARS = 2000
 export const RATE_LIMIT_ERRCODE = -12
 export const SESSION_EXPIRED_ERRCODE = -14
 /**
- * ret=-2 is the rate-limit/session-class business error (docs/protocol.md §5).
- * Its MEANING lives in `errmsg`: "prepare failed" / "unknown error" = stale
- * context_token (recover by resending WITHOUT the token — iLink accepts
- * tokenless sends as a degraded fallback); "rate limited" / "freq limit" =
- * frequency limit (recover by backing off). Any other -2 text is treated as
- * a frequency limit (hermes-agent classification, RATE_LIMIT_ERRCODE=-2).
+ * ret=-2 is a business-level session/rate-limit class. Its concrete meaning
+ * is determined by `errmsg` and `classifySendFailure()`; see docs/protocol.md §5.
  */
 export const SESSION_CLASS_RET = -2
 export const STALE_SESSION_ERRMSG_MARKERS = ['prepare failed', 'unknown error'] as const
@@ -256,18 +252,9 @@ export interface SendResult {
   errcode?: number
   errmsg?: string
   messageId?: number
-  /**
-   * Server-side business classification (when `ret != 0`): stale-session and
-   * rate-limit are RECOVERABLE (tokenless resend / backoff); generic is a
-   * permanent rejection of this payload.
-   */
+  /** Server-side business classification used by the outbox recovery policy. */
   failureClass?: SendFailureClass
-  /**
-   * Whether a retry may succeed. false = the SERVER explicitly rejected the
-   * message with a business error other than the rate-limit/session-class
-   * ret=-2 (protocol.md §5) — retrying is pointless. true or undefined =
-   * transport-level failure (timeout/network/HTTP) — retryable.
-   */
+  /** Whether this attempt is eligible for transport/business retry. */
   retryable?: boolean
   /**
    * UNCERTAIN outcome (OpenClaw 2.0 alignment, #104632): the request timed
