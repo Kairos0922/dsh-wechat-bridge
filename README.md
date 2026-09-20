@@ -32,13 +32,14 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 > **不提供旧宿主兼容路径**。会话日志读取统一走 `src/session-events.ts`：只读受支持的 `snapshotEvents()`，
 > API 缺失或抛错时记一次 `session-events-api-drift` 诊断并退化为空日志，**绝不抛错**
 > （2026-09-10 事故：静默 `undefined` 让插件在 turn/end 抛错 → 未处理 rejection → 宿主 `exit(1)`，已入队答复丢失）。
+
 > 升级宿主时请同步升级本插件依赖并重新 `pnpm verify`。
 
 > 若你的 profile 不叫 `web`，把 `--profile web` 换成你的 profile 名。
 
 **第 2 步：扫码配对**——打开 DSH Web 界面 → 设置面板 → 插件 → 微信桥 → 点击「扫码配对」，用你的微信扫码确认。
 
-> **扫码即配对（bootstrap）**：信任集为空时，第一个扫码用户的微信 id 自动进入信任集（持久化保存，无需手写配置）；信任集非空后，新用户扫码需在 Web 面板点「确认」才加入，换账号扫码同样需确认后才切换凭据。**多用户**：每个用户拥有独立会话/上下文/偏好，后来的扫码不会顶替先前用户。`allowFrom` 仅用于预授权或收紧（见下表）。
+> **扫码即配对（bootstrap）**：信任集为空时，第一个扫码用户的微信 id 自动进入信任集（持久化保存，无需手写配置）；信任集非空后，新用户扫码需在 Web 面板点「确认」才加入，换账号扫码同样需确认后才切换凭据。**多用户**：每个用户拥有独立会话/上下文/偏好，后来的扫码不会顶替先前用户。allowFrom 仅用于预授权或收紧（见下表）。
 
 然后直接在微信里给机器人发消息即可——没有会话时会**自动创建**（默认模式），不用手动 `/new`。常用命令见下节。
 
@@ -162,6 +163,6 @@ scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 
 ## 许可
 
-MIT。协议客户端与 Markdown 过滤器移植自 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)（MIT）；架构范式参照 [Jesse-njx/dsh-chatnode-wechat](https://github.com/Jesse-njx/dsh-chatnode-wechat)（MIT）。完整署名见 [LICENSE](LICENSE)。
+MIT。协议客户端与 Markdown 过滤器基于 [Tencent/openclaw-weixin](https://github.com/Tencent/openclaw-weixin)（MIT）移植并适配；项目整体实现基于 **OpenClaw 及其官方实现**，并针对 DSH 运行时进行了适配。相关版权与许可证信息见 [LICENSE](LICENSE)。
 
 > ⚠️ 本通道经腾讯微信机器人网关，腾讯可能限制账号；建议使用愿意承担风险的微信号。仅使用官方 iLink 通道，不涉及任何非官方协议。
