@@ -23,7 +23,11 @@ function makeOutbox(overrides: {
     sessionExpiredPauseMs: 60 * 60_000,
     sessionWindowMax: overrides.sessionWindowMax,
     now: overrides.now,
-    sleep: overrides.sleep,
+    // Tests must keep their wait timers referenced. The production default is intentionally unref'd,
+    // which is correct for a long-lived host but lets a standalone Node test process exit while drain() awaits.
+    sleep:
+      overrides.sleep ??
+      ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
     send: async (entry) => {
       sent.push(entry)
       return results.shift() ?? { ok: true }
