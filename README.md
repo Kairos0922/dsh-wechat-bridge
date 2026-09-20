@@ -14,7 +14,7 @@
 - **上下文透明**：每轮结束附上下文用量（`🧮 12.0k / 32.0k`），接近上限提示自动压缩并建议 `/new`；自动压缩发生时主动告知
 - **可打断**：执行中回复「停 / 停止 / 算了」立即取消，停止后附进度摘要与 `/retry` 引导；断线恢复自动通知
 - **安全边界**：白名单外的消息只记日志、绝不喂给模型（可选 `notifyRejected` 提醒）；危险操作经审批，在微信里回复 `/yes` `/no` 或编号即可决定
-- **提问可答（`ask_user_question`）**：agent 中途提问会以编号菜单推到微信，回复编号（多选回复 `1,3`）或直接回文字即可作答；多个问题逐条问、不会挤在一条里；提问会阻塞整个 turn，因此有 `questionTimeoutSec` 兜底超时，`/stop` 始终可中断。**修复前**：提问被转发给浏览器面板，微信侧什么都看不到，turn 静默挂死（2026-09-20 事故）
+- **提问可答（`ask_user_question`）**：agent 中途提问会以编号菜单推到微信，回复编号（多选回复 `1,3`）或直接回文字即可作答；多个问题逐条问、不会挤在一条里；提问会阻塞整个 turn，因此有 `questionTimeoutSec` 兜底超时，`/stop` 始终可中断
 - **工程化底座**：限流感知出站队列（窗口预算 + 自动退避）、typing 缓存、断线重连、持久化去重、崩溃可恢复、媒体失败不静默
 - **Web 设置面板**：扫码配对、白名单、模式一览、桥内偏好（模型/工作区）、出站队列状态——不用碰终端
 
@@ -70,8 +70,8 @@ dsh plugin --profile web add https://github.com/Kairos0922/dsh-wechat-bridge.git
 | 方向 | 类型 | 状态 |
 |---|---|---|
 | 微信 → bot | 图片 | ✅ 生产可用（CDN 下载 + AES 解密落盘） |
-| 微信 → bot | 文件 | ✅ 代码就绪（同管线下载落盘 + mime 表；实现与官方 `downloadMediaFromItem` 对齐，待生产实测后转 ✅） |
-| 微信 → bot | 视频 | ✅ 代码就绪（同上，落盘 .mp4；待生产实测后转 ✅） |
+| 微信 → bot | 文件 | ✅ 已实现（统一 CDN 下载/解密/落盘管线；独立真机实测待补） |
+| 微信 → bot | 视频 | ✅ 已实现（下载后校验 MP4 `ftyp` 并落盘；独立真机实测待补） |
 | 微信 → bot | 语音 | ⚠️ 仅取微信转写文本；无转写字段时明确告知（协议支持 SILK 下载转码，未实现） |
 | bot → 微信 | 图片 | ✅ 实测正常显示（`/card` 长图、agent 图片输出） |
 | bot → 微信 | 文件附件 | ✅ 实测可用（`/export`、`fileThresholdChars` 长文转文件） |
@@ -156,10 +156,11 @@ scripts/dry-run.sh --check    # 隔离干跑（临时 DSH_HOME，不动生产）
 
 ## 文档
 
-- [docs/protocol.md](docs/protocol.md) — 协议规格（iLink 常量/消息结构/媒体流程/错误码，权威定义）
-- [docs/verification-records.md](docs/verification-records.md) — 验证记录（Markdown 渲染矩阵、健壮性审计）
-- [docs/porting-notes.md](docs/porting-notes.md) — 移植对照与探针矩阵
-- [CHANGELOG.md](CHANGELOG.md)
+- [docs/protocol.md](docs/protocol.md) — 当前协议规格与实现契约
+- [docs/verification-records.md](docs/verification-records.md) — 可复现验证记录与事故复盘
+- [docs/porting-notes.md](docs/porting-notes.md) — 上游移植与适配边界
+- [RELEASING.md](RELEASING.md) — 发布检查清单
+- [CHANGELOG.md](CHANGELOG.md) — 版本历史
 
 ## 许可
 
