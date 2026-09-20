@@ -121,6 +121,8 @@ export class Outbox {
   private readonly onError?: OutboxOptions['onError']
   private readonly budget?: { windowMs: number; maxPerWindow: number }
   private readonly sessionWindowMax: number
+  /** drain() must use a referenced timer when the production sleep seam is unref'd. */
+  private readonly drainSleep: (ms: number) => Promise<void>
   /** Successful sends per peer since the peer's last inbound (session window). */
   private readonly windowCounts = new Map<string, number>()
   private queue: OutboxEntry[] = []
@@ -135,20 +137,29 @@ export class Outbox {
   private budgetSends: number[] = []
 
   constructor(opts: OutboxOptions) {
+    const productionSleep =
+      opts.sleep ??
+      ((ms: number) =>
+        new Promise<void>((resolve) => {
+          // Unref'd: a paused queue must never keep the process alive.
+          const timer = setTimeout(resolve, ms)
+          timer.unref?.()
+        }))
+    this.drainSleep =
+      opts.sleep ??
+      ((ms: number) =>
+        new Promise<void>((resolve) => {
+          // drain() is an explicit waiter; keep its timer referenced so a
+          // standalone Node test process cannot exit with a pending promise.
+          setTimeout(resolve, ms)
+        }))
     this.opts = {
       minIntervalMs: opts.minIntervalMs,
       backoffSecs: opts.backoffSecs,
       sessionExpiredPauseMs: opts.sessionExpiredPauseMs,
       send: opts.send,
       now: opts.now ?? Date.now,
-      sleep:
-        opts.sleep ??
-        ((ms: number) =>
-          new Promise<void>((resolve) => {
-            // Unref'd: a paused queue must never keep the process alive.
-            const timer = setTimeout(resolve, ms)
-            timer.unref?.()
-          })),
+      sleep: productionSleep,
     }
     this.onPause = opts.onPause
     this.onDrop = opts.onDrop
@@ -214,7 +225,7 @@ export class Outbox {
   /** Wait until the queue is empty and no pause remains (tests/dispose). */
   async drain(): Promise<void> {
     while (this.queue.length > 0 || this.pumping || (this.pausedUntil !== null && this.pausedUntil > this.opts.now())) {
-      await this.opts.sleep(5)
+      await this.drainSleep(5)
     }
   }
 
