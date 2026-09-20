@@ -16,6 +16,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId, type Session } from '@deepseek-ai/dsh-session';
 import type { MessageItem } from '../gateway/types.ts';
 import { type PendingApproval } from './approvals.ts';
+import { type PendingQuestion } from './questions.ts';
 import { BridgeState } from './state.ts';
 import { Outbox, type OutboxEntryKind } from './outbox.ts';
 import type { MarkdownMode } from './markdown.ts';
@@ -35,6 +36,12 @@ declare module '@deepseek-ai/cordis' {
 export interface ResolvedNodeConfig {
     allowFrom: string[];
     approvalTimeoutSec: number;
+    /**
+     * How long a WeChat `ask_user_question` prompt waits for an answer before it
+     * is reported to the agent as unanswered. Bounds a blocking tool that would
+     * otherwise hang the turn forever (2026-09-20 incident).
+     */
+    questionTimeoutSec: number;
     maxMessageChars: number;
     /** Minimum spacing between outbound sends (rate-limit hygiene). */
     minSendIntervalMs: number;
@@ -108,6 +115,13 @@ export declare function sessionIdCreatedAt(id: string): number;
  * still-queued copy instead of duplicating (coalesce semantics).
  */
 export declare const APPROVAL_COALESCE_PREFIX = "approval:";
+/**
+ * Outbox coalesce-key prefix for `ask_user_question` prompts (per-request key:
+ * `question:<peer>:<number>`). Mirrors the approval prefix so a dropped
+ * question is re-pushed on the peer's next inbound message instead of leaving
+ * the turn blocked behind an answer the user never saw.
+ */
+export declare const QUESTION_COALESCE_PREFIX = "question:";
 /**
  * Cap on MUST-DELIVER messages kept per peer for re-push after a channel
  * outage — a long outage must not dump a wall of stale messages.
@@ -209,6 +223,14 @@ export declare class WechatBridgeNode {
      * phone exactly then, and the channel is demonstrably alive.
      */
     private readonly approvalPromptDropped;
+    /**
+     * `ask_user_question` requests awaiting a WeChat reply, keyed by their prompt
+     * number. The turn is BLOCKED on these — see questions.ts.
+     */
+    private readonly pendingQuestions;
+    private questionCounter;
+    /** Peers whose question prompt failed to deliver (outbox drop). */
+    private readonly questionPromptDropped;
     /**
      * MUST-DELIVER messages that were dropped while the channel was down
      * (final answers, error/stop notices). Re-pushed on the peer's next
@@ -411,7 +433,7 @@ export declare class WechatBridgeNode {
     private readonly stopWords;
     /** Request cancellation of the peer's running turn with instant feedback. */
     stopTurn(peerId: string): Promise<void>;
-    /** Route one inbound text: menus/approvals → commands → the active agent. */
+    /** Route one inbound text: questions/approvals → menus → commands → the active agent. */
     handleText(peerId: string, text: string): Promise<void>;
     /** Resume a persisted session's agent (dsh-agent registry). */
     private resumeSession;
@@ -462,5 +484,38 @@ export declare class WechatBridgeNode {
      * the peer's requests is pending.
      */
     resolveApproval(text: string, peerId: string): boolean;
+    nextQuestionNumber(): number;
+    registerQuestion(number: number, question: PendingQuestion): void;
+    /**
+     * Forget a pending question. Settlement belongs to the bridge's own settle
+     * path (questions.ts `cleanup`), which deregisters through here — so this is
+     * deliberately a plain removal, never a rejection.
+     */
+    clearQuestion(number: number): void;
+    /** Whether the peer is blocked waiting on an `ask_user_question` answer. */
+    hasPendingQuestion(peerId: string): boolean;
+    /** Whether the peer has an approval prompt outstanding (see approvals.ts). */
+    hasPendingApproval(peerId: string): boolean;
+    /**
+     * Enqueue a question prompt with the question coalesce key — a newer prompt
+     * for the same request replaces a still-queued older one (a multi-question
+     * request re-renders as the user advances), and a dropped one is marked for
+     * re-push on the peer's next inbound message.
+     */
+    enqueueQuestionPrompt(peerId: string, text: string, number: number): void;
+    /**
+     * Re-push the peer's pending question prompt after a delivery failure —
+     * called on the peer's next inbound message. A question the user never saw
+     * blocks the turn indefinitely, so this path matters more than its approval
+     * twin: the prompt is rebuilt from live state at the question now on screen.
+     */
+    retryQuestionPrompt(peerId: string): void;
+    /**
+     * Feed an inbound message to the peer's oldest pending `ask_user_question`
+     * request. Returns whether the message was consumed; `false` lets ordinary
+     * routing continue, which is what keeps `/stop` reachable while a question
+     * blocks the turn (a slash command is never an answer — see questions.ts).
+     */
+    resolveUserQuestion(text: string, peerId: string): boolean;
 }
 //# sourceMappingURL=core.d.ts.map

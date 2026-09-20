@@ -25,6 +25,13 @@ export interface NodeConfig {
   allowFrom?: string[]
   /** Approval prompt timeout before default-deny (seconds). */
   approvalTimeoutSec?: number
+  /**
+   * How long an `ask_user_question` prompt waits for a WeChat answer before it
+   * is reported to the agent as unanswered (seconds). A question blocks the
+   * whole turn, so this bound is what keeps a missed prompt from hanging the
+   * session forever.
+   */
+  questionTimeoutSec?: number
   /** Max chars per WeChat bubble. */
   maxMessageChars?: number
   /** Minimum spacing between outbound sends (rate-limit hygiene). */
@@ -99,6 +106,7 @@ export interface NodeConfig {
 export const Config: z<NodeConfig> = z.object({
   allowFrom: z.array(z.string()).default([]),
   approvalTimeoutSec: z.number().min(1).default(600),
+  questionTimeoutSec: z.number().min(1).default(1800),
   maxMessageChars: z.number().min(1).default(MAX_MESSAGE_CHARS),
   minSendIntervalMs: z.number().min(0).default(5_000),
   rateLimitBackoffSecs: z.array(z.number().min(1)).default([10, 30, 60]),
@@ -139,6 +147,7 @@ function apply(ctx: Context, config: NodeConfig): void {
   const resolved: ResolvedNodeConfig = {
     allowFrom: config.allowFrom ?? [],
     approvalTimeoutSec: config.approvalTimeoutSec ?? 600,
+    questionTimeoutSec: config.questionTimeoutSec ?? 1800,
     maxMessageChars: config.maxMessageChars ?? MAX_MESSAGE_CHARS,
     minSendIntervalMs: config.minSendIntervalMs ?? 5_000,
     rateLimitBackoffSecs: config.rateLimitBackoffSecs ?? [10, 30, 60],

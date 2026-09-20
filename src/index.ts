@@ -40,6 +40,12 @@ export interface Config {
   allowFrom?: string[]
   /** Approval prompt timeout before default-deny (seconds). */
   approvalTimeoutSec?: number
+  /**
+   * How long an `ask_user_question` prompt waits for a WeChat answer before it
+   * is reported to the agent as unanswered (seconds). Bounds a tool call that
+   * blocks the whole turn — it must never hang forever.
+   */
+  questionTimeoutSec?: number
   /** Max chars per WeChat bubble. */
   maxMessageChars?: number
   /** Minimum spacing between outbound sends (rate-limit hygiene, ms). */
@@ -125,6 +131,9 @@ export interface Config {
 export const Config: z<Config> = z.object({
   allowFrom: z.array(z.string()).default([]),
   approvalTimeoutSec: z.number().default(600),
+  // 30 minutes: a question blocks the whole turn, and the user may be away from
+  // the phone — but it must never block forever (2026-09-20 incident).
+  questionTimeoutSec: z.number().default(1800),
   maxMessageChars: z.number().default(2000),
   minSendIntervalMs: z.number().default(5_000),
   rateLimitBackoffSecs: z.array(z.number()).default([10, 30, 60]),
@@ -196,6 +205,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.plugin(wechatBridgeNode, {
     allowFrom: config.allowFrom ?? [],
     approvalTimeoutSec: config.approvalTimeoutSec,
+    questionTimeoutSec: config.questionTimeoutSec,
     maxMessageChars: config.maxMessageChars,
     minSendIntervalMs: config.minSendIntervalMs,
     rateLimitBackoffSecs: config.rateLimitBackoffSecs,

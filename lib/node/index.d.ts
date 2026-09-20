@@ -20,6 +20,13 @@ export interface NodeConfig {
     allowFrom?: string[];
     /** Approval prompt timeout before default-deny (seconds). */
     approvalTimeoutSec?: number;
+    /**
+     * How long an `ask_user_question` prompt waits for a WeChat answer before it
+     * is reported to the agent as unanswered (seconds). A question blocks the
+     * whole turn, so this bound is what keeps a missed prompt from hanging the
+     * session forever.
+     */
+    questionTimeoutSec?: number;
     /** Max chars per WeChat bubble. */
     maxMessageChars?: number;
     /** Minimum spacing between outbound sends (rate-limit hygiene). */

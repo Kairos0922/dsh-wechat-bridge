@@ -20,6 +20,7 @@ import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { InboundEvent, MessageItem, SendResult } from '../gateway/types.ts'
 import { attachApprovalBridge, buildApprovalPrompt, type PendingApproval } from './approvals.ts'
+import { attachUserQuestionBridge, buildQuestionPrompt, type PendingQuestion } from './questions.ts'
 import { listSessions, routeCommand } from './commands.ts'
 import { handleInbound } from './inbound.ts'
 import { attachSessionOutbound, sendTextToPeer, splitForWechat } from './outbound.ts'
@@ -45,6 +46,12 @@ declare module '@deepseek-ai/cordis' {
 export interface ResolvedNodeConfig {
   allowFrom: string[]
   approvalTimeoutSec: number
+  /**
+   * How long a WeChat `ask_user_question` prompt waits for an answer before it
+   * is reported to the agent as unanswered. Bounds a blocking tool that would
+   * otherwise hang the turn forever (2026-09-20 incident).
+   */
+  questionTimeoutSec: number
   maxMessageChars: number
   /** Minimum spacing between outbound sends (rate-limit hygiene). */
   minSendIntervalMs: number
@@ -125,6 +132,14 @@ export function sessionIdCreatedAt(id: string): number {
  * still-queued copy instead of duplicating (coalesce semantics).
  */
 export const APPROVAL_COALESCE_PREFIX = 'approval:'
+
+/**
+ * Outbox coalesce-key prefix for `ask_user_question` prompts (per-request key:
+ * `question:<peer>:<number>`). Mirrors the approval prefix so a dropped
+ * question is re-pushed on the peer's next inbound message instead of leaving
+ * the turn blocked behind an answer the user never saw.
+ */
+export const QUESTION_COALESCE_PREFIX = 'question:'
 
 /**
  * Cap on MUST-DELIVER messages kept per peer for re-push after a channel
@@ -249,6 +264,14 @@ export class WechatBridgeNode {
    */
   private readonly approvalPromptDropped = new Set<string>()
   /**
+   * `ask_user_question` requests awaiting a WeChat reply, keyed by their prompt
+   * number. The turn is BLOCKED on these — see questions.ts.
+   */
+  private readonly pendingQuestions = new Map<number, PendingQuestion>()
+  private questionCounter = 0
+  /** Peers whose question prompt failed to deliver (outbox drop). */
+  private readonly questionPromptDropped = new Set<string>()
+  /**
    * MUST-DELIVER messages that were dropped while the channel was down
    * (final answers, error/stop notices). Re-pushed on the peer's next
    * inbound message, in order, up to CRITICAL_RESEND_CAP entries.
@@ -322,6 +345,11 @@ export class WechatBridgeNode {
             if (entry.coalesceKey?.startsWith(APPROVAL_COALESCE_PREFIX)) {
               this.approvalPromptDropped.add(entry.to)
               debugLogEvent({ event: 'approval-prompt-dropped', peer: entry.to, reason })
+            } else if (entry.coalesceKey?.startsWith(QUESTION_COALESCE_PREFIX)) {
+              // A lost question prompt is worse than a lost approval: the turn
+              // stays blocked until the user answers something they never saw.
+              this.questionPromptDropped.add(entry.to)
+              debugLogEvent({ event: 'question-prompt-dropped', peer: entry.to, reason })
             } else {
               // A dropped chunk of a pending final answer re-pushes the WHOLE
               // answer — the peer must never receive "(2/2)" without "(1/2)".
@@ -383,6 +411,10 @@ export class WechatBridgeNode {
     watchdog.unref?.()
     this.disposers.push(() => clearInterval(watchdog))
     this.disposers.push(attachApprovalBridge(this))
+    // The WeChat peer is the human at the keyboard: answer `ask_user_question`
+    // over WeChat instead of letting the turn block on a browser prompt the
+    // user cannot see (2026-09-20 incident).
+    this.disposers.push(attachUserQuestionBridge(this))
     this.disposers.push(attachMediaRetention(this))
     this.disposers.push(
       this.ctx.on('wechat/message', (payload: InboundEvent) => {
@@ -466,6 +498,11 @@ export class WechatBridgeNode {
     for (const menu of this.menus.values()) clearTimeout(menu.timer)
     this.menus.clear()
     for (const number of [...this.pending.keys()]) this.clearApproval(number)
+    // Settle pending questions: a disposed node can no longer receive the reply
+    // that would unblock them, and a promise that never settles would hang the
+    // asker forever. `discard` rejects, which surfaces as a tool error the
+    // agent can act on.
+    for (const question of [...this.pendingQuestions.values()]) question.discard()
     // DSH disposers are synchronous. Flush already-seen debounce entries into
     // the serialized inbound chain before closing the state store; otherwise
     // an update can acknowledge a message and then discard it.
@@ -789,12 +826,29 @@ export class WechatBridgeNode {
       if (Date.now() - lastNotice < WechatBridgeNode.STALL_MS) continue
       this.lastStallNoticeAt.set(peerId, Date.now())
       const mins = Math.round(stalledMs / 60_000)
-      this.enqueueText(
-        peerId,
-        `⚠️ 任务已运行 ${mins} 分钟没有动静（可能是模型通道异常）。回复 /stop 中断、/retry 重跑，或继续等待。`,
-        { kind: 'system', resendOnRecovery: true },
-      )
-      debugLogEvent({ event: 'stall-notice', peer: peerId, stalledMs })
+      // Silence while blocked on the USER is not a channel failure. Reporting
+      // "模型通道异常" there sends the operator hunting the wrong problem: on
+      // 2026-09-20 a question the user never received was reported as a model
+      // failure five times over 32 minutes. Name the actual blocker instead.
+      const blockedOnQuestion = this.hasPendingQuestion(peerId)
+      const blockedOnApproval = !blockedOnQuestion && this.hasPendingApproval(peerId)
+      // A question the user never saw blocks the turn forever, and the user
+      // cannot speak up about a prompt they do not know exists — so a dropped
+      // prompt gets a second delivery attempt on every watchdog tick, not only
+      // after the peer's next inbound.
+      if (blockedOnQuestion) this.retryQuestionPrompt(peerId)
+      const notice = blockedOnQuestion
+        ? `⚠️ 任务已等待你的回答 ${mins} 分钟——有一个提问还没作答，任务卡在这里。回复编号作答，或 /stop 中断。`
+        : blockedOnApproval
+          ? `⚠️ 任务已等待你的确认 ${mins} 分钟——有一条审批还没回复。回复 /yes 同意、/no 拒绝，或 /stop 中断。`
+          : `⚠️ 任务已运行 ${mins} 分钟没有动静（可能是模型通道异常）。回复 /stop 中断、/retry 重跑，或继续等待。`
+      this.enqueueText(peerId, notice, { kind: 'system', resendOnRecovery: true })
+      debugLogEvent({
+        event: 'stall-notice',
+        peer: peerId,
+        stalledMs,
+        blockedOn: blockedOnQuestion ? 'question' : blockedOnApproval ? 'approval' : 'none',
+      })
     }
   }
 
@@ -1349,7 +1403,7 @@ export class WechatBridgeNode {
     await sendTextToPeer(this, peerId, '⏹ 正在停止…', { kind: 'system', priority: OUTBOX_PRIORITY.must })
   }
 
-  /** Route one inbound text: menus/approvals → commands → the active agent. */
+  /** Route one inbound text: questions/approvals → menus → commands → the active agent. */
   async handleText(peerId: string, text: string): Promise<void> {
     debugLog({
       event: 'text',
@@ -1365,6 +1419,13 @@ export class WechatBridgeNode {
       }
       // idle: the word is just an ordinary message — fall through
     }
+    // A blocked `ask_user_question` needs the reply MORE than anything else
+    // does — the turn cannot proceed without it. It is tried before approvals
+    // because a question may offer 3+ options, so bare numbers must reach it;
+    // an approval's unambiguous `/yes` `/no` still fall through (a slash
+    // command is never an answer), only its bare `1`/`2` shortcut can be
+    // shadowed while a question is pending.
+    if (this.resolveUserQuestion(text, peerId)) return
     if (this.resolveApproval(text, peerId)) return
     if (this.tryResolveMenu(peerId, text)) return
     let routed: Awaited<ReturnType<typeof routeCommand>>
@@ -1655,5 +1716,99 @@ export class WechatBridgeNode {
       return true
     }
     return false
+  }
+
+  // ---------------------------------------------------------------- questions
+
+  nextQuestionNumber(): number {
+    this.questionCounter += 1
+    return this.questionCounter
+  }
+
+  registerQuestion(number: number, question: PendingQuestion): void {
+    this.pendingQuestions.set(number, question)
+  }
+
+  /**
+   * Forget a pending question. Settlement belongs to the bridge's own settle
+   * path (questions.ts `cleanup`), which deregisters through here — so this is
+   * deliberately a plain removal, never a rejection.
+   */
+  clearQuestion(number: number): void {
+    this.pendingQuestions.delete(number)
+  }
+
+  /** Whether the peer is blocked waiting on an `ask_user_question` answer. */
+  hasPendingQuestion(peerId: string): boolean {
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.peerId === peerId) return true
+    }
+    return false
+  }
+
+  /** Whether the peer has an approval prompt outstanding (see approvals.ts). */
+  hasPendingApproval(peerId: string): boolean {
+    for (const pending of this.pending.values()) {
+      if (pending.peerId === peerId) return true
+    }
+    return false
+  }
+
+  /**
+   * Enqueue a question prompt with the question coalesce key — a newer prompt
+   * for the same request replaces a still-queued older one (a multi-question
+   * request re-renders as the user advances), and a dropped one is marked for
+   * re-push on the peer's next inbound message.
+   */
+  enqueueQuestionPrompt(peerId: string, text: string, number: number): void {
+    this.enqueueText(peerId, text, {
+      kind: 'system',
+      // MUST-DELIVER: the whole turn is blocked on this prompt — it outranks
+      // everything else and is exempt from the session-window quota.
+      priority: OUTBOX_PRIORITY.must,
+      coalesceKey: `${QUESTION_COALESCE_PREFIX}${peerId}:${number}`,
+      resendOnRecovery: true,
+    })
+  }
+
+  /**
+   * Re-push the peer's pending question prompt after a delivery failure —
+   * called on the peer's next inbound message. A question the user never saw
+   * blocks the turn indefinitely, so this path matters more than its approval
+   * twin: the prompt is rebuilt from live state at the question now on screen.
+   */
+  retryQuestionPrompt(peerId: string): void {
+    if (!this.questionPromptDropped.has(peerId)) return
+    this.questionPromptDropped.delete(peerId)
+    let pushed = 0
+    for (const pending of this.pendingQuestions.values()) {
+      if (pending.peerId !== peerId) continue
+      this.enqueueQuestionPrompt(
+        peerId,
+        buildQuestionPrompt(pending, this.resolved.questionTimeoutSec),
+        pending.number,
+      )
+      pushed += 1
+    }
+    if (pushed > 0) {
+      debugLogEvent({ event: 'question-prompt-resent', peer: peerId, count: pushed })
+    }
+  }
+
+  /**
+   * Feed an inbound message to the peer's oldest pending `ask_user_question`
+   * request. Returns whether the message was consumed; `false` lets ordinary
+   * routing continue, which is what keeps `/stop` reachable while a question
+   * blocks the turn (a slash command is never an answer — see questions.ts).
+   */
+  resolveUserQuestion(text: string, peerId: string): boolean {
+    const entries = [...this.pendingQuestions.entries()].filter(
+      ([, question]) => question.peerId === peerId,
+    )
+    if (entries.length === 0) return false
+    // Oldest-first (Map insertion order): with several requests outstanding the
+    // prompts are answered in the order they were shown.
+    const [, pending] = entries[0]!
+    return pending.submit(text) === 'accepted'
   }
 }

@@ -310,10 +310,11 @@ export async function handleInbound(node: WechatBridgeNode, payload: InboundEven
   node.outbox.resetWindow(peerKey)
 
   // Channel-recovery hooks: a new inbound message proves the user is at the
-  // phone and the token is fresh — re-push approval prompts and MUST-DELIVER
-  // messages (final answers / error / stop notices) whose first delivery
-  // failed (审批必达 + 关键结果必达: core.retryApprovalPrompt /
-  // core.retryCriticalMessages).
+  // phone and the token is fresh — re-push question and approval prompts and
+  // MUST-DELIVER messages (final answers / error / stop notices) whose first
+  // delivery failed (提问必达 + 审批必达 + 关键结果必达: core.retryQuestionPrompt /
+  // core.retryApprovalPrompt / core.retryCriticalMessages).
+  node.retryQuestionPrompt(peerKey)
   node.retryApprovalPrompt(peerKey)
   node.retryCriticalMessages(peerKey)
 
